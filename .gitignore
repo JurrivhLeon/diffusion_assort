@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Python data
+*.pth
+
+# PyTorch / models
+*.pt
+*.pth
+
+# Outputs and checkpoints
+outputs*/
+diffusion*/
+
+# Datasets (excluded by default — use Git LFS or Releases)
+datasets/
+
+# IDE/editor
+.vscode/
+.idea/
