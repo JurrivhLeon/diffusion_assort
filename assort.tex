@@ -1,0 +1,242 @@
+\pdfoutput=1
+\documentclass[11pt]{article}
+\usepackage[OT1]{fontenc}
+\usepackage{smile}
+\usepackage{subcaption}
+\usepackage{pdflscape}   
+\usepackage{pifont}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric}
+% ===== Morandi palette =====
+\definecolor{morandiGreen}{RGB}{140,160,140}
+\definecolor{morandiPink}{RGB}{244,186,180}  
+\definecolor{morandiBlue}{RGB}{190,210,250}  
+\definecolor{morandiOrange}{RGB}{200,160,120}
+\definecolor{morandiPurple}{RGB}{150,140,160}
+\definecolor{morandiGray}{RGB}{160,160,160}
+\usepackage[margin=1in]{geometry}
+\usepackage[most]{tcolorbox}
+\renewcommand{\baselinestretch}{1.10}
+%%%%%%%%%%%%-- Comments --%%%%%%%%%%%%
+%%%%%%%%%%%%-- new command --%%%%%%%%%%%%
+\newcommand{\bbP}{\mathbb{P}}
+\newcommand{\bbR}{\mathbb{R}}
+\newcommand{\bbE}{\mathbb{E}}
+\newcommand{\bbN}{\mathbb{N}}
+\newcommand{\wh}{\widehat}
+\newcommand{\wt}{\widetilde}
+\newcommand{\ol}{\overline}
+%%%%%%%%%%%%-- start --%%%%%%%%%%%%%%%
+\title{\bf Diffusion-Based Assortment Optimization}
+%\author{Junyi Liao$^1$,\ \ Ethan X. Fang$^2$,\ \ Zhuoran Yang$^3$,\ \ Vahid Tarokh$^1$\\ ~\\ $^{1}$\small\it Department of Electrical and Computer Engineering, Duke University \\ $^{2}$\small\it Department of Biostatistics and Bioinformatics, Duke University \\ $^{3}$\small\it Department of Statistics and Data Science, Yale University \\ \small\sf \{junyi.liao, ethan.fang, vahid.tarokh\}@duke.edu, zhuoran.yang@yale.edu}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+%%%%%%%%%%%%-- main content --%%%%%%%%%%
+\section{Problem Setting}
+
+Let $[N] = {1,\dots,N}$ denote the set of available products, and let $\mathscr{S} \subseteq 2^{[N]}$ denote the feasible set of assortments (e.g., subject to cardinality or business constraints). For any assortment $s \in \mathscr{S}$, a customer selects an item
+\begin{equation*}
+A \in s \cup \{0\},
+\end{equation*}
+where $A=0$ denotes the no-purchase option. We assume a choice model
+\begin{equation*}
+p_\theta(a\,|\, s), \qquad a \in [N]\cup\{0\},
+\end{equation*}
+satisfying $p_\theta(a\,|\, s)=0$ for $a \notin s \cup\{0\}$. The reward function is given by
+\begin{equation*}
+r(s,a) \in \mathbb{R}, \qquad a \in [N]\cup\{0\},
+\end{equation*}
+with $r(s,a)=0$ for $a \notin s$ and typically $r(s,0)=0$. The expected reward of an assortment $s$ under model $\theta$ is
+\begin{equation*}
+R_\theta(s)=\sum_{a \in [N]\,\cup\,\{0\}} r(s,a)\, p_\theta(a\,|\,s).
+\end{equation*}
+
+\paragraph{Offline learning.} \citep{wang2023neural, dong2025pasta, han2025learning}
+We are given an offline dataset
+\begin{equation*}
+\mathcal{D} = \{(S_i, A_i)\}_{i=1}^n,
+\end{equation*}
+where each $S_i \in \mathscr{S}$ is a historical assortment and $A_i \in S_i \cup\{0\}$ is the observed choice.
+
+\paragraph{Pessimistic objective.}
+Due to insufficient coverage of assortments in $\mathcal{D}$, direct plug-in optimization of $R_\theta(s)$ may lead to overestimation. Following the principle of pessimism, we define an uncertainty set $\mathcal{U}$ over model parameters and consider the pessimistic value
+\begin{equation*}
+R_{\mathrm{pes}}(s)=\inf_{\theta \in \mathcal{U}} R_\theta(s).
+\end{equation*}
+Our goal is to solve
+\begin{equation*}
+s^\star \in \arg\max_{s \in \mathscr{S}} R_{\mathrm{pes}}(s).
+\end{equation*}
+Equivalently, we define an energy function
+\begin{equation*}
+E(s) := - R_{\mathrm{pes}}(s).
+\end{equation*}
+
+
+\section{Our Pipeline}
+
+We propose a three-stage framework that combines flexible choice modeling, pessimistic evaluation, and generative optimization.
+
+\paragraph{Step 1: Choice model estimation.}
+We learn a choice model $p_\theta(a\,|\, s)$ from offline data by maximum likelihood:
+\begin{equation*}
+\hat{\theta}
+\in
+\argmin_{\theta}
+-\frac{1}{n} \sum_{i=1}^n \log p_\theta(A_i \mid S_i).
+\end{equation*}
+We can use reference models in \citep{wang2023neural}
+
+\paragraph{Step 2: Pessimistic reward construction.}
+We construct a pessimistic estimator $R_{\mathrm{pes}}(s)$ to account for uncertainty due to limited coverage. In practice, we approximate
+\begin{equation*}
+R_{\mathrm{pes}}(s)
+\approx
+\hat{R}(s) - \kappa \cdot \sigma(s),
+\end{equation*}
+where
+\begin{equation*}
+\hat{R}(s)=\sum_a r(s,a)\, p_{\hat{\theta}}(a\,|\, s),
+\end{equation*}
+and $\sigma(s)$ measures uncertainty (e.g., via ensemble variance or sensitivity to $\theta$).
+
+\paragraph{Step 3: Generative optimization.}
+Instead of solving the combinatorial optimization problem directly, we define a Boltzmann distribution over assortments:
+\begin{equation*}
+\pi_\beta(s)
+\propto
+\exp\bigl(\beta R_{\mathrm{pes}}(s)\bigr),
+\end{equation*}
+where $\beta > 0$ is an inverse temperature. We then approximately sample from $\pi_\beta$ using guided discrete diffusion, and select high-value samples.
+
+\section{Guided Discrete Diffusion}
+
+We apply a discrete diffusion process \citep{austin2021structured} over assortments to sample from the combinatorial space efficiently.
+\subsection{General discrete diffusion (variable cardinality)}
+We first consider the general setting where assortments are represented as binary vectors
+\begin{equation*}
+s \in \{0,1\}^N,
+\end{equation*}
+without a fixed cardinality constraint.
+
+\paragraph{Forward process.}
+We define a coordinate-wise corruption process that progressively randomizes each entry. For each coordinate $i \in [N]$,
+\begin{equation*}
+q_t(s_{t,i} \mid s_{t-1,i})=(1-\beta_t)\,\mathbf{1}\{s_{t,i} = s_{t-1,i}\}
++
+\beta_t \cdot \frac{1}{2},
+\end{equation*}
+where $\beta_t \in (0,1)$ is a noise schedule. Equivalently, with probability $\beta_t$, the bit is resampled uniformly from $\{0,1\}$; otherwise it is kept unchanged. The full transition factorizes as
+\begin{equation*}
+q(s_t \mid s_{t-1})=\prod_{i=1}^N q_t(s_{t,i} \mid s_{t-1,i}).
+\end{equation*}
+As $t$ increases, $s_t$ approaches a uniform distribution over $\{0,1\}^N$.
+
+\paragraph{Reverse model (denoising).}
+We parameterize the reverse process via a neural network that outputs logits over each coordinate:
+\begin{equation*}
+g_\phi(s_t, t) \in \mathbb{R}^N.
+\end{equation*}
+These logits define independent Bernoulli distributions:
+\begin{equation*}
+p_\phi(s_{t-1,i} = 1 \mid s_t, t)=\sigma\bigl(g_\phi^{(i)}(s_t, t)\bigr),
+\end{equation*}
+where $\sigma(\cdot)$ is the sigmoid function. Thus, the reverse transition factorizes as
+\begin{equation*}
+p_\phi(s_{t-1} \mid s_t, t)=\prod_{i=1}^N p_\phi(s_{t-1,i} \mid s_t, t).
+\end{equation*}
+The model is trained via denoising: given $s_0$ and a corrupted $s_t \sim q(\cdot\,|\, s_0)$, we minimize the cross-entropy loss between predicted marginals and $s_0$.
+
+\paragraph{Guided reverse process.}
+To incorporate pessimistic reward, we bias the reverse transition using an energy term. Since $s_{t-1}$ is high-dimensional, we approximate guidance using local updates.
+
+For each coordinate $i$, consider flipping the bit:
+\begin{equation*}
+s^{(i)} =
+(s_{t,1}, \dots, 1 - s_{t,i}, \dots, s_{t,N}).
+\end{equation*}
+We define a guided logit
+\begin{equation*}
+\tilde{g}_\phi^{(i)}(s_t, t)=g_\phi^{(i)}(s_t, t)
++
+\lambda_t \beta \bigl(R_{\mathrm{pes}}(s^{(i)}) - R_{\mathrm{pes}}(s_t)\bigr).
+\end{equation*}
+The reverse transition becomes
+\begin{equation*}
+p_{\mathrm{guide}}(s_{t-1,i}=1 \mid s_t, t)=\sigma\bigl(\tilde{g}_\phi^{(i)}(s_t, t)\bigr).
+\end{equation*}
+
+\paragraph{Sampling.}
+Starting from $s_T \sim \mathrm{Uniform}({0,1}^N)$, we iterate
+\begin{equation*}
+s_{t-1} \sim p_{\mathrm{guide}}(\cdot \mid s_t, t),
+\qquad t = T, \dots, 1.
+\end{equation*}
+Optionally, feasibility constraints (e.g., cardinality) can be enforced via projection or penalty terms after each step.
+
+\paragraph{Discussion.}
+This formulation provides a fully factorized discrete diffusion process that:
+\begin{itemize}[itemsep=-2pt, topsep=2pt]
+\item avoids combinatorial enumeration over $2^N$ subsets,
+\item allows efficient local reward evaluation via single-bit flips,
+\item naturally incorporates pessimistic guidance into each coordinate update.
+\end{itemize}
+
+\subsection{General discrete diffusion (fixed cardinality)}
+\paragraph{Forward process.}
+Now we restrict to a feasible subset such as
+\begin{equation*}
+\mathscr{S}_K = \{s \in \{0,1\}^N : \|s\|_1 = K\}.
+\end{equation*} 
+We define a forward noising process $q(s_t\,|\, s_{t-1})$ that progressively corrupts assortments. For fixed-cardinality assortments, we use a swap-based corruption:
+\begin{equation*}
+s_t = s_{t-1} \setminus\{u\} \cup \{v\},
+\end{equation*}
+where $u \in s_{t-1}$ and $v \notin s_{t-1}$ are sampled uniformly.
+
+\paragraph{Reverse model.}
+We learn a reverse transition model
+\begin{equation*}
+p_\phi(s_{t-1}\,|\, s_t, t),
+\end{equation*}
+parameterized as a distribution over local moves. The model is trained via denoising by sampling $s_t \sim q(\cdot\,|\, s_0)$ and predicting the clean state or reverse transition.
+
+\paragraph{Guided reverse process.}
+Let $\mathcal{N}(s_t)$ denote the set of feasible neighbors of $s_t$. For each candidate $s' \in \mathcal{N}(s_t)$, we define
+\begin{equation*}
+\log p_{\mathrm{guide}}(s'\,|\, s_t, t)=\log p_\phi(s'\,|\, s_t, t)
++
+\lambda_t \beta R_{\mathrm{pes}}(s').
+\end{equation*}
+Thus,
+\begin{equation*}
+p_{\mathrm{guide}}(s' \mid s_t, t)
+\propto
+p_\phi(s' \mid s_t, t)
+\exp\bigl(\lambda_t \beta R_{\mathrm{pes}}(s')\bigr),
+\quad s' \in \mathcal{N}(s_t).
+\end{equation*}
+
+\paragraph{Sampling procedure.}
+Starting from an initial noisy state $s_T$, we iteratively sample
+\begin{equation*}
+s_{t-1} \sim p_{\mathrm{guide}}(\cdot \mid s_t, t),
+\qquad t = T, \dots, 1.
+\end{equation*}
+The final sample $s_0$ is a candidate assortment. We generate multiple samples and select the one maximizing $R_{\mathrm{pes}}(s)$.
+
+\paragraph{Interpretation.}
+The proposed method approximates sampling from
+\begin{equation*}
+\pi_\beta(s) \propto \exp(\beta R_{\mathrm{pes}}(s)),
+\end{equation*}
+where the reverse diffusion model provides proposals and the pessimistic reward acts as guidance.
+
+%%%%%%%%%%%%-- reference --%%%%%%%%%%%
+\bibliographystyle{ims}
+\bibliography{reference}
+
+\end{document}
