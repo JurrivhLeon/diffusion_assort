@@ -186,8 +186,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--time-limit",
         type=float,
-        default=300.0,
-        help="Total wall-clock time limit in seconds for the MIP backend.",
+        default=math.inf,
+        help="Total wall-clock time limit in seconds for the MIP backend; use inf for no limit.",
     )
     parser.add_argument(
         "--max-iterations",
@@ -198,7 +198,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dinkelbach-tol",
         type=float,
-        default=1e-6,
+        default=1e-3,
         help="Stopping tolerance for the fractional objective iterations.",
     )
     parser.add_argument(
@@ -256,24 +256,21 @@ def _heuristic_start_assortment(
     max_cardinality: int | None,
     exact_cardinality: int | None,
 ) -> list[int]:
-    product_rewards = [float(x) for x in reward_coeffs[1:]]
-    n_products = len(product_rewards)
-
-    if n_products == 0:
-        return []
-
-    ranked = sorted(range(n_products), key=lambda j: product_rewards[j], reverse=True)
-
     if exact_cardinality is not None:
+        product_rewards = [float(x) for x in reward_coeffs[1:]]
+        n_products = len(product_rewards)
+        if n_products == 0:
+            return []
+        ranked = sorted(range(n_products), key=lambda j: product_rewards[j], reverse=True)
         k = min(int(exact_cardinality), n_products)
         chosen = ranked[:k]
-    elif max_cardinality is not None:
-        k = min(int(max_cardinality), n_products)
-        chosen = [j for j in ranked if product_rewards[j] > 0][:k]
     else:
-        chosen = [j for j in ranked if product_rewards[j] > 0]
+        # For the sparse unconstrained baseline, start from the all-zero assortment.
+        # This keeps the initial incumbent simple and feasible for max-cardinality
+        # or unconstrained runs.
+        return [0] * (len(reward_coeffs) - 1)
 
-    assortment = [0] * n_products
+    assortment = [0] * len(product_rewards)
     for j in chosen:
         assortment[j] = 1
     return assortment
@@ -918,6 +915,8 @@ def main() -> None:
             "and is read from the dataset metadata. Use --backend exhaustive for custom reward modules."
         )
 
+    start = time.monotonic()
+
     if args.backend == "mip":
         result = _solve_mip_backend(
             meta=meta,
@@ -942,6 +941,7 @@ def main() -> None:
             "reward_module": str(args.reward_module) if args.reward_module else None,
             "max_cardinality": args.max_cardinality,
             "exact_cardinality": args.exact_cardinality,
+            "runtime_sec": time.monotonic() - start,
         }
     )
 

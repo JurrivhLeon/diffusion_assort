@@ -37,6 +37,7 @@ import json
 from dataclasses import dataclass
 import math
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -84,6 +85,20 @@ def sample_dirichlet(rng: random.Random, concentration: float, size: int) -> Lis
 class MCCMParameters:
     initial_probs: List[float]
     transition_matrix: List[List[float]]
+
+
+def _emit_progress(prefix: str, current: int, total: int, *, width: int = 28) -> None:
+    """Render a lightweight progress bar to stderr."""
+    if total <= 0:
+        return
+    current = max(0, min(current, total))
+    ratio = current / total
+    filled = min(width, max(0, int(round(width * ratio))))
+    bar = "#" * filled + "-" * (width - filled)
+    message = f"{prefix} [{bar}] {current}/{total} ({ratio * 100:5.1f}%)"
+    end = "\n" if current >= total else "\r"
+    sys.stderr.write(message + end)
+    sys.stderr.flush()
 
 
 def sample_mccm_parameters(
@@ -499,14 +514,24 @@ def sample_boltzmann_assortments_gibbs(
         return current
 
     samples: List[List[int]] = []
-    for _ in range(burn_in_sweeps):
-        states = sweep(states)
+    if burn_in_sweeps > 0:
+        burn_in_step = max(1, burn_in_sweeps // 100)
+        for sweep_idx in range(burn_in_sweeps):
+            states = sweep(states)
+            if (
+                (sweep_idx + 1) % burn_in_step == 0
+                or sweep_idx + 1 == burn_in_sweeps
+            ):
+                _emit_progress("Boltzmann burn-in", sweep_idx + 1, burn_in_sweeps)
 
+    sample_step = max(1, n_samples // 100)
     while len(samples) < n_samples:
         for _ in range(thinning_sweeps):
             states = sweep(states)
         for row in states.detach().cpu().tolist():
             samples.append([int(v) for v in row])
+            if len(samples) % sample_step == 0 or len(samples) == n_samples:
+                _emit_progress("Boltzmann samples", len(samples), n_samples)
             if len(samples) >= n_samples:
                 break
 
@@ -591,7 +616,12 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
             f"Unknown choice_model {config.choice_model!r}. Supported models: 'mnl', 'mccm'."
         )
 
-    for _ in range(config.n_samples):
+    show_loop_progress = not (
+        config.assortment_policy == "boltzmann"
+        and config.boltzmann_sampler == "mcmc"
+    )
+    loop_step = max(1, config.n_samples // 100) if show_loop_progress else 0
+    for sample_idx in range(config.n_samples):
         if config.assortment_policy == "boltzmann":
             if config.boltzmann_sampler == "exact":
                 assortment = exact_boltzmann_fn()
@@ -614,15 +644,19 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
                     f"Unknown boltzmann_sampler {config.boltzmann_sampler!r}."
                 )
         else:
-            assortment = sample_assortment(
-                rng,
-                config.n_products,
-                config.assortment_policy,
-                config.assortment_size,
-                config.include_empty_assortment,
-            )
+                assortment = sample_assortment(
+                    rng,
+                    config.n_products,
+                    config.assortment_policy,
+                    config.assortment_size,
+                    config.include_empty_assortment,
+                )
         choice = sample_choice_fn(assortment)
         data.append({"S": assortment, "A": choice})
+        if show_loop_progress and (
+            (sample_idx + 1) % loop_step == 0 or sample_idx + 1 == config.n_samples
+        ):
+            _emit_progress("Dataset samples", sample_idx + 1, config.n_samples)
 
     meta = {
         "N": config.n_products,
