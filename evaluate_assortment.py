@@ -26,6 +26,7 @@ import torch
 
 from assortment_dataset import load_assortment_json
 from choice_models import GAsN, RAsN
+from generate_assortment_data import build_mccm_model_from_meta
 
 
 RewardFn = Callable[[Sequence[int], int, dict], float]
@@ -174,6 +175,11 @@ def batched_expected_reward(
         values = (probs * reward_vec.unsqueeze(0)).sum(dim=-1)
         return values.squeeze(0) if squeezed else values
 
+    if policy_kind == "true_mccm" and getattr(reward_fn, "_is_default_reward_fn", False):
+        model = build_mccm_model_from_meta(meta, device=assortments.device)
+        values = model.batched_expected_reward(assortments)
+        return values.squeeze(0) if squeezed else values
+
     if policy_kind == "model" and getattr(reward_fn, "_is_default_reward_fn", False):
         if policy_model is None:
             if checkpoint_path is None:
@@ -265,6 +271,10 @@ def policy_probabilities(
         outside_utility = float(meta.get("outside_utility", 0.0))
         return mnl_probabilities(assortment, utilities, outside_utility)
 
+    if policy_kind == "true_mccm":
+        model = build_mccm_model_from_meta(meta)
+        return [float(p) for p in model.choice_probabilities(assortment).tolist()]
+
     if policy_kind == "model":
         if checkpoint_path is None:
             raise ValueError("--checkpoint is required when --policy model is used.")
@@ -275,7 +285,7 @@ def policy_probabilities(
         probs = model(S).squeeze(0).tolist()
         return [float(p) for p in probs]
 
-    raise ValueError("--policy must be one of: true_mnl, model.")
+    raise ValueError("--policy must be one of: true_mnl, true_mccm, model.")
 
 
 def expected_reward(
@@ -313,8 +323,8 @@ def build_argparser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default="true_mnl",
-        choices=("true_mnl", "model"),
-        help="Use the true MNL policy from metadata or a trained checkpoint.",
+        choices=("true_mnl", "true_mccm", "model"),
+        help="Use the true policy from metadata or a trained checkpoint.",
     )
     parser.add_argument(
         "--checkpoint",

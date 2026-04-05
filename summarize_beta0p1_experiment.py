@@ -8,6 +8,8 @@ writes a compact comparison report to ``outputs_N20_beta0.1/report.json``.
 from __future__ import annotations
 
 import json
+import math
+import statistics
 from pathlib import Path
 
 from evaluate_assortment import build_reward_fn, expected_reward, load_assortment_json
@@ -70,13 +72,32 @@ def summarize_guided(path: Path) -> dict:
     samples = [bits_to_str(sample) for sample in data["samples"]]
     best_true_i = max(range(len(rewards)), key=lambda i: rewards[i])
     best_guided_i = max(range(len(guided_scores)), key=lambda i: guided_scores[i])
+    sorted_rewards = sorted(rewards)
+
+    def quantile(q: float) -> float:
+        if not sorted_rewards:
+            return float("nan")
+        if len(sorted_rewards) == 1:
+            return float(sorted_rewards[0])
+        pos = (len(sorted_rewards) - 1) * q
+        lo = int(math.floor(pos))
+        hi = int(math.ceil(pos))
+        if lo == hi:
+            return float(sorted_rewards[lo])
+        weight = pos - lo
+        return float(sorted_rewards[lo] * (1.0 - weight) + sorted_rewards[hi] * weight)
+
     return {
         "num_samples": len(samples),
         "mean_true_reward": sum(rewards) / len(rewards),
+        "true_reward_std": statistics.pstdev(rewards),
+        "true_reward_q50": quantile(0.5),
+        "true_reward_q90": quantile(0.9),
         "best_true_reward": rewards[best_true_i],
         "best_true_sample": samples[best_true_i],
         "best_guided_score": guided_scores[best_guided_i],
         "best_guided_sample": samples[best_guided_i],
+        "best_guided_true_reward": rewards[best_guided_i],
         "contains_true_optimum": TRUE_OPTIMUM in samples,
         "count_true_optimum": samples.count(TRUE_OPTIMUM),
     }

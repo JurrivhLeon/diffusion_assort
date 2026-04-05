@@ -116,6 +116,7 @@ def _guided_summary(path: Path) -> dict[str, Any]:
                 "mean_guided_score": sum(guided_scores) / len(guided_scores),
                 "best_guided_score": guided_scores[best_guided_idx],
                 "best_guided_sample": _as_sample_string(data["samples"][best_guided_idx]),
+                "best_guided_true_reward": rewards[best_guided_idx],
             }
         )
     return summary
