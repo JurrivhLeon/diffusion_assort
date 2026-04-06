@@ -43,7 +43,8 @@ for N in 20 40 60 80 100; do
         --seed "${SEED}" \
         --choice-model mnl \
         --assortment-policy boltzmann \
-        --boltzmann-beta "${BETA}"
+        --boltzmann-beta "${BETA}" \
+        --mcmc-device cuda
     done
   done
 done
