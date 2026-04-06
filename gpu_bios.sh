@@ -17,7 +17,7 @@ conda activate SpaRest
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="/hpc/home/xj58/diffusion_assort"
 OUTPUT_ROOT="/hpc/home/xj58/diffusion_assort_datasets/generated_mnl"
 
 mkdir -p "${OUTPUT_ROOT}"
