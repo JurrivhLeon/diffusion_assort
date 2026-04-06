@@ -44,6 +44,7 @@ for N in 20 40 60 80 100; do
         --choice-model mnl \
         --assortment-policy boltzmann \
         --boltzmann-beta "${BETA}" \
+		--boltzmann-sampler mcmc \
         --mcmc-device cuda
     done
   done
