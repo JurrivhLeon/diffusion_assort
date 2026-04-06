@@ -429,6 +429,51 @@ def _build_true_mnl_mip(
     return model, assort_vars, offer_vars, reward_coeffs, exp_outside
 
 
+def _build_learned_mnl_mip(
+    meta: dict,
+    checkpoint_path: Path,
+    max_cardinality: int | None,
+    exact_cardinality: int | None,
+) -> tuple[Model, list, list, list[float], float, torch.nn.Module]:
+    model = _load_choice_model(checkpoint_path)
+    if model.__class__.__name__ != "MNL":
+        raise ValueError(
+            f"Expected an MNL checkpoint, got {model.__class__.__name__!r}."
+        )
+    n_products = int(meta["N"])
+    if int(getattr(model, "n_products", n_products)) != n_products:
+        raise ValueError("Checkpoint and dataset disagree on N.")
+
+    reward_coeffs = _reward_vector(meta)
+    outside_logit = float(model.outside_logit.detach().cpu().item())
+    product_utilities = [float(x) for x in model.product_utilities.detach().cpu().tolist()]
+    exp_outside = math.exp(outside_logit)
+    exp_utils = [math.exp(x) for x in product_utilities]
+
+    mip_model = Model(sense=MAXIMIZE, solver_name=CBC)
+    assort_vars = [
+        mip_model.add_var(var_type=BINARY, name=f"s_{j}")
+        for j in range(n_products)
+    ]
+    if exact_cardinality is not None:
+        mip_model += xsum(assort_vars) == int(exact_cardinality)
+    elif max_cardinality is not None:
+        mip_model += xsum(assort_vars) <= int(max_cardinality)
+
+    offer_vars = []
+    for j in range(n_products):
+        y = mip_model.add_var(
+            lb=0.0,
+            ub=float(exp_utils[j]),
+            var_type=CONTINUOUS,
+            name=f"offer_{j}",
+        )
+        mip_model += y == float(exp_utils[j]) * assort_vars[j]
+        offer_vars.append(y)
+
+    return mip_model, assort_vars, offer_vars, reward_coeffs, exp_outside, model
+
+
 def _build_neural_mip(
     meta: dict,
     checkpoint_path: Path,
@@ -800,13 +845,22 @@ def _solve_mip_backend(
     else:
         if checkpoint_path is None:
             raise ValueError("--checkpoint is required when --policy model is used.")
-        mip_model, assort_vars, offer_vars, reward_coeffs, exp_outside, model_obj = _build_neural_mip(
-            meta,
-            checkpoint_path=checkpoint_path,
-            max_cardinality=max_cardinality,
-            exact_cardinality=exact_cardinality,
-            exp_pieces=exp_pieces,
-        )
+        loaded_model = _load_choice_model(checkpoint_path)
+        if loaded_model.__class__.__name__ == "MNL":
+            mip_model, assort_vars, offer_vars, reward_coeffs, exp_outside, model_obj = _build_learned_mnl_mip(
+                meta,
+                checkpoint_path=checkpoint_path,
+                max_cardinality=max_cardinality,
+                exact_cardinality=exact_cardinality,
+            )
+        else:
+            mip_model, assort_vars, offer_vars, reward_coeffs, exp_outside, model_obj = _build_neural_mip(
+                meta,
+                checkpoint_path=checkpoint_path,
+                max_cardinality=max_cardinality,
+                exact_cardinality=exact_cardinality,
+                exp_pieces=exp_pieces,
+            )
 
     start_assortment = _heuristic_start_assortment(
         reward_coeffs,

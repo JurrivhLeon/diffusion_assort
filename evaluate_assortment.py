@@ -25,7 +25,7 @@ from typing import Callable, Sequence
 import torch
 
 from assortment_dataset import load_assortment_json
-from choice_models import GAsN, RAsN
+from choice_models import GAsN, MNL, RAsN
 from generate_assortment_data import build_mccm_model_from_meta
 
 
@@ -247,6 +247,8 @@ def load_policy_from_checkpoint(
 
     if model_name == "gasn":
         model = GAsN(n_products=n_products, hidden_sizes=hidden_sizes)
+    elif model_name == "mnl":
+        model = MNL(n_products=n_products)
     elif model_name == "rasn":
         model = RAsN(n_products=n_products, num_blocks=num_blocks)
     else:

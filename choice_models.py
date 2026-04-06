@@ -114,6 +114,71 @@ class GAsN(nn.Module):
         raise ValueError("reduction must be one of: none, mean, sum.")
 
 
+class MNL(nn.Module):
+    """Feature-free multinomial logit with learnable product utilities."""
+
+    def __init__(
+        self,
+        n_products: int,
+        *,
+        learnable_outside_logit: bool = True,
+    ) -> None:
+        super().__init__()
+        if n_products <= 0:
+            raise ValueError("n_products must be positive.")
+        self.n_products = int(n_products)
+        self.product_utilities = nn.Parameter(torch.zeros(self.n_products))
+        self.learnable_outside_logit = bool(learnable_outside_logit)
+        if self.learnable_outside_logit:
+            self.outside_logit = nn.Parameter(torch.zeros(()))
+        else:
+            self.register_buffer("outside_logit", torch.zeros(()))
+
+    def logits(self, S: torch.Tensor) -> torch.Tensor:
+        S, squeezed = _ensure_batch(S)
+        logits = self.product_utilities.unsqueeze(0).expand(S.shape[0], -1)
+        return logits.squeeze(0) if squeezed else logits
+
+    def forward(self, S: torch.Tensor) -> torch.Tensor:
+        S, squeezed = _ensure_batch(S)
+        product_logits = self.logits(S)
+        if product_logits.dim() == 1:
+            product_logits = product_logits.unsqueeze(0)
+        outside = self.outside_logit.expand(product_logits.shape[0], 1)
+        logits = torch.cat([outside, product_logits], dim=-1)
+        mask = torch.cat(
+            [torch.ones_like(S[:, :1], dtype=torch.bool), S.to(dtype=torch.bool)],
+            dim=-1,
+        )
+        probs = _masked_softmax(logits, mask)
+        return probs.squeeze(0) if squeezed else probs
+
+    def log_prob(self, S: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        probs = self.forward(S)
+        A = A.long()
+        if probs.dim() == 1:
+            return torch.log(probs[A].clamp_min(1e-12))
+        if A.dim() == 0:
+            A = A.unsqueeze(0)
+        return torch.log(probs.gather(-1, A.unsqueeze(-1)).squeeze(-1).clamp_min(1e-12))
+
+    def negative_log_likelihood(
+        self,
+        S: torch.Tensor,
+        A: torch.Tensor,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        logp = self.log_prob(S, A)
+        nll = -logp
+        if reduction == "none":
+            return nll
+        if reduction == "mean":
+            return nll.mean()
+        if reduction == "sum":
+            return nll.sum()
+        raise ValueError("reduction must be one of: none, mean, sum.")
+
+
 class RAsN(nn.Module):
     """Res-Assort-Net from Section 4.1.
 
