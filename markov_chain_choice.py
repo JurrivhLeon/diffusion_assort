@@ -14,73 +14,12 @@ evaluation can reuse the same implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import random
 from typing import Sequence
 
 import torch
 
-
-def _sample_dirichlet(
-    rng: random.Random,
-    concentration: float,
-    size: int,
-) -> list[float]:
-    if size <= 0:
-        raise ValueError("size must be positive.")
-    if concentration <= 0.0:
-        raise ValueError("concentration must be positive.")
-    draws = [rng.gammavariate(concentration, 1.0) for _ in range(size)]
-    total = sum(draws)
-    if total <= 0.0:
-        raise RuntimeError("Failed to sample a valid Dirichlet vector.")
-    return [x / total for x in draws]
-
-
-@dataclass(frozen=True)
-class MCCMParameters:
-    """Parameters for the Markov chain choice model."""
-
-    initial_probs: list[float]
-    transition_matrix: list[list[float]]
-
-
-def sample_mccm_parameters(
-    rng: random.Random,
-    n_products: int,
-    *,
-    concentration: float = 1.0,
-) -> MCCMParameters:
-    """Sample a random Markov chain choice model.
-
-    The returned model uses state ``0`` as the no-purchase state. State ``0`` is
-    absorbing, while every product state transitions to every other state except
-    itself with positive probability.
-    """
-    if n_products <= 0:
-        raise ValueError("n_products must be positive.")
-
-    n_states = n_products + 1
-    initial_probs = _sample_dirichlet(rng, concentration, n_states)
-
-    transition_matrix: list[list[float]] = [[0.0] * n_states for _ in range(n_states)]
-    transition_matrix[0][0] = 1.0
-
-    for i in range(1, n_states):
-        row_without_self = _sample_dirichlet(rng, concentration, n_states - 1)
-        row = [0.0] * n_states
-        idx = 0
-        for j in range(n_states):
-            if j == i:
-                continue
-            row[j] = row_without_self[idx]
-            idx += 1
-        transition_matrix[i] = row
-
-    return MCCMParameters(
-        initial_probs=initial_probs,
-        transition_matrix=transition_matrix,
-    )
+from mccm_generation import MCCMParameters, sample_mccm_parameters
 
 
 class MarkovChainChoiceModel:
@@ -181,4 +120,3 @@ class MarkovChainChoiceModel:
     def sample_choice(self, rng: random.Random, assortment: Sequence[int]) -> int:
         probs = self.choice_probabilities(assortment).tolist()
         return int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
-

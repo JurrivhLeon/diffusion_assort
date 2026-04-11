@@ -25,8 +25,8 @@ from typing import Callable, Sequence
 import torch
 
 from assortment_dataset import load_assortment_json
-from choice_models import GAsN, RAsN
-from generate_assortment_data import build_mccm_model_from_meta
+from choice_models import GAsN, RAsN, TCNet
+from generate_assortment_data import build_mccm_model_from_meta, build_mmnl_model_from_meta
 
 
 RewardFn = Callable[[Sequence[int], int, dict], float]
@@ -180,6 +180,11 @@ def batched_expected_reward(
         values = model.batched_expected_reward(assortments)
         return values.squeeze(0) if squeezed else values
 
+    if policy_kind == "true_mmnl" and getattr(reward_fn, "_is_default_reward_fn", False):
+        model = build_mmnl_model_from_meta(meta, device=assortments.device)
+        values = model.batched_expected_reward(assortments)
+        return values.squeeze(0) if squeezed else values
+
     if policy_kind == "model" and getattr(reward_fn, "_is_default_reward_fn", False):
         if policy_model is None:
             if checkpoint_path is None:
@@ -242,13 +247,36 @@ def load_policy_from_checkpoint(
     ckpt = torch.load(checkpoint_path, map_location=device)
     model_name = ckpt.get("model")
     n_products = int(ckpt["n_products"])
-    hidden_sizes = ckpt.get("hidden_sizes", [n_products])
-    num_blocks = int(ckpt.get("num_blocks", 1))
+    hidden_sizes = ckpt.get("hidden_sizes")
+    num_blocks = ckpt.get("num_blocks", 1)
 
     if model_name == "gasn":
+        if hidden_sizes is None:
+            hidden_sizes = [n_products]
         model = GAsN(n_products=n_products, hidden_sizes=hidden_sizes)
     elif model_name == "rasn":
-        model = RAsN(n_products=n_products, num_blocks=num_blocks)
+        num_blocks = int(num_blocks) if num_blocks is not None else 1
+        if hidden_sizes is None:
+            model = RAsN(n_products=n_products, num_blocks=num_blocks)
+        else:
+            model = RAsN(n_products=n_products, hidden_sizes=hidden_sizes, num_blocks=num_blocks)
+    elif model_name == "tcn":
+        tcn_config = dict(ckpt.get("tcn_config") or {})
+        embedding_dim = int(tcn_config.get("embedding_dim", n_products))
+        num_layers = int(tcn_config.get("num_layers", 1))
+        num_heads = int(tcn_config.get("num_heads", 1))
+        ffn_dim = int(tcn_config.get("ffn_dim", 4 * embedding_dim))
+        dropout = float(tcn_config.get("dropout", 0.1))
+        learnable_outside_logit = bool(tcn_config.get("learnable_outside_logit", True))
+        model = TCNet(
+            n_products=n_products,
+            embedding_dim=embedding_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+            learnable_outside_logit=learnable_outside_logit,
+        )
     else:
         raise ValueError(f"Unknown checkpoint model type {model_name!r}.")
 
@@ -271,6 +299,10 @@ def policy_probabilities(
         outside_utility = float(meta.get("outside_utility", 0.0))
         return mnl_probabilities(assortment, utilities, outside_utility)
 
+    if policy_kind == "true_mmnl":
+        model = build_mmnl_model_from_meta(meta)
+        return [float(p) for p in model.choice_probabilities(assortment).tolist()]
+
     if policy_kind == "true_mccm":
         model = build_mccm_model_from_meta(meta)
         return [float(p) for p in model.choice_probabilities(assortment).tolist()]
@@ -285,7 +317,7 @@ def policy_probabilities(
         probs = model(S).squeeze(0).tolist()
         return [float(p) for p in probs]
 
-    raise ValueError("--policy must be one of: true_mnl, true_mccm, model.")
+    raise ValueError("--policy must be one of: true_mnl, true_mmnl, true_mccm, model.")
 
 
 def expected_reward(
@@ -323,7 +355,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default="true_mnl",
-        choices=("true_mnl", "true_mccm", "model"),
+        choices=("true_mnl", "true_mmnl", "true_mccm", "model"),
         help="Use the true policy from metadata or a trained checkpoint.",
     )
     parser.add_argument(

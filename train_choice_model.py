@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 from assortment_dataset import AssortmentChoiceDataset
-from choice_models import GAsN, RAsN
+from choice_models import GAsN, RAsN, TCNet
 
 
 @dataclass
@@ -35,14 +35,50 @@ def build_model(
     n_products: int,
     hidden_sizes: Sequence[int],
     num_blocks: int,
+    tcn_config: dict | None,
 ) -> torch.nn.Module:
     if model_name == "gasn":
         return GAsN(n_products=n_products, hidden_sizes=hidden_sizes)
     if model_name == "rasn":
         if num_blocks <= 0:
             raise ValueError("--num-blocks must be positive.")
-        return RAsN(n_products=n_products, num_blocks=num_blocks)
-    raise ValueError("--model must be one of: gasn, rasn.")
+        return RAsN(n_products=n_products, hidden_sizes=hidden_sizes, num_blocks=num_blocks)
+    if model_name == "tcn":
+        if tcn_config is None:
+            raise ValueError("tcn_config must be provided when --model tcn is used.")
+        return TCNet(n_products=n_products, **tcn_config)
+    raise ValueError("--model must be one of: gasn, rasn, tcn.")
+
+
+def build_tcn_config(args: argparse.Namespace, n_products: int) -> dict:
+    embedding_dim = n_products if args.tcn_embedding_dim is None else int(args.tcn_embedding_dim)
+    if embedding_dim <= 0:
+        raise ValueError("--tcn-embedding-dim must be positive.")
+
+    num_layers = int(args.tcn_num_layers)
+    if num_layers <= 0:
+        raise ValueError("--tcn-num-layers must be positive.")
+
+    num_heads = int(args.tcn_num_heads)
+    if num_heads <= 0:
+        raise ValueError("--tcn-num-heads must be positive.")
+
+    ffn_dim = 4 * embedding_dim if args.tcn_ffn_dim is None else int(args.tcn_ffn_dim)
+    if ffn_dim <= 0:
+        raise ValueError("--tcn-ffn-dim must be positive.")
+
+    dropout = float(args.tcn_dropout)
+    if dropout < 0.0 or dropout >= 1.0:
+        raise ValueError("--tcn-dropout must be in [0, 1).")
+
+    return {
+        "embedding_dim": embedding_dim,
+        "num_layers": num_layers,
+        "num_heads": num_heads,
+        "ffn_dim": ffn_dim,
+        "dropout": dropout,
+        "learnable_outside_logit": True,
+    }
 
 
 def build_run_config(
@@ -50,13 +86,15 @@ def build_run_config(
     args: argparse.Namespace,
     n_products: int,
     hidden_sizes: Sequence[int],
+    tcn_config: dict | None,
 ) -> dict:
     architecture = {
         "name": args.model,
         "n_products": n_products,
-        "hidden_sizes": list(hidden_sizes) if args.model == "gasn" else None,
+        "hidden_sizes": list(hidden_sizes) if args.model in ("gasn", "rasn") else None,
         "num_blocks": args.num_blocks if args.model == "rasn" else None,
         "learnable_outside_logit": True,
+        "tcn": tcn_config,
     }
     training = {
         "epochs": args.epochs,
@@ -132,27 +170,57 @@ def train_one_epoch(
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train GAsN or RAsN on assortment-choice JSON data."
+        description="Train GAsN, RAsN, or TCNet on assortment-choice JSON data."
     )
     parser.add_argument("--data", type=Path, required=True, help="Path to JSON dataset.")
     parser.add_argument(
         "--model",
         type=str,
         default="gasn",
-        choices=("gasn", "rasn"),
+        choices=("gasn", "rasn", "tcn"),
         help="Choice model architecture.",
     )
     parser.add_argument(
         "--hidden-sizes",
         type=str,
         default=None,
-        help="Comma-separated hidden sizes for GAsN, e.g. '64,64'. Default: 'N'.",
+        help="Comma-separated hidden sizes for GAsN/RAsN, e.g. '64,64'. Default: 'N'. Ignored for TCN.",
     )
     parser.add_argument(
         "--num-blocks",
         type=int,
         default=1,
         help="Number of residual blocks for RAsN.",
+    )
+    parser.add_argument(
+        "--tcn-embedding-dim",
+        type=int,
+        default=None,
+        help="Embedding dimension for TCNet. Default: N.",
+    )
+    parser.add_argument(
+        "--tcn-num-layers",
+        type=int,
+        default=1,
+        help="Number of attention blocks for each TCNet encoder.",
+    )
+    parser.add_argument(
+        "--tcn-num-heads",
+        type=int,
+        default=1,
+        help="Number of attention heads for TCNet.",
+    )
+    parser.add_argument(
+        "--tcn-ffn-dim",
+        type=int,
+        default=None,
+        help="Feed-forward hidden dimension inside TCNet blocks. Default: 4 * embedding dim.",
+    )
+    parser.add_argument(
+        "--tcn-dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate used in TCNet attention and feed-forward blocks.",
     )
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser.add_argument("--batch-size", type=int, default=128, help="Training batch size.")
@@ -210,6 +278,7 @@ def main() -> None:
     dataset = AssortmentChoiceDataset(args.data)
     n_products = dataset.n_products
     hidden_sizes = parse_sizes(args.hidden_sizes, default=(n_products,))
+    tcn_config = build_tcn_config(args, n_products) if args.model == "tcn" else None
 
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
@@ -226,13 +295,18 @@ def main() -> None:
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-    model = build_model(args.model, n_products, hidden_sizes, args.num_blocks).to(device)
+    model = build_model(args.model, n_products, hidden_sizes, args.num_blocks, tcn_config).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
 
     args.outdir.mkdir(parents=True, exist_ok=True)
-    run_config = build_run_config(args=args, n_products=n_products, hidden_sizes=hidden_sizes)
+    run_config = build_run_config(
+        args=args,
+        n_products=n_products,
+        hidden_sizes=hidden_sizes,
+        tcn_config=tcn_config,
+    )
     with (args.outdir / "run_config.json").open("w", encoding="utf-8") as f:
         json.dump(run_config, f, indent=2)
         f.write("\n")
@@ -263,8 +337,9 @@ def main() -> None:
                 "optimizer_state_dict": optimizer.state_dict(),
                 "model": args.model,
                 "n_products": n_products,
-                "hidden_sizes": hidden_sizes,
-                "num_blocks": args.num_blocks,
+                "hidden_sizes": hidden_sizes if args.model in ("gasn", "rasn") else None,
+                "num_blocks": args.num_blocks if args.model == "rasn" else None,
+                "tcn_config": tcn_config,
                 "dataset_path": str(args.data),
                 "seed": args.seed,
             },
@@ -282,8 +357,9 @@ def main() -> None:
                     "optimizer_state_dict": optimizer.state_dict(),
                     "model": args.model,
                     "n_products": n_products,
-                    "hidden_sizes": hidden_sizes,
-                    "num_blocks": args.num_blocks,
+                    "hidden_sizes": hidden_sizes if args.model in ("gasn", "rasn") else None,
+                    "num_blocks": args.num_blocks if args.model == "rasn" else None,
+                    "tcn_config": tcn_config,
                     "dataset_path": str(args.data),
                     "seed": args.seed,
                 },

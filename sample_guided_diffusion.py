@@ -61,7 +61,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default="model",
-        choices=("model", "true_mnl", "true_mccm"),
+        choices=("model", "true_mnl", "true_mmnl", "true_mccm"),
         help="Choice model used to score candidates during guidance.",
     )
     parser.add_argument(
@@ -118,7 +118,12 @@ def main() -> None:
         str(args.choice_checkpoint),
         device=device,
     )
-    true_policy_kind = "true_mccm" if meta.get("choice_model") == "mccm" else "true_mnl"
+    if meta.get("choice_model") == "mccm":
+        true_policy_kind = "true_mccm"
+    elif meta.get("choice_model") == "mmnl":
+        true_policy_kind = "true_mmnl"
+    else:
+        true_policy_kind = "true_mnl"
     true_reward_fn = build_batched_expected_reward_fn(
         meta,
         reward_fn,

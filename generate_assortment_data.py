@@ -2,17 +2,23 @@
 """Synthetic assortment-choice dataset generator.
 
 This script generates offline assortment optimization data under either a
-multinomial logit (MNL) or Markov chain choice model (MCCM).
+multinomial logit (MNL), mixed multinomial logit (MMNL), or Markov chain
+choice model (MCCM).
 
 Output format:
 {
   "meta": {
     "N": int,
-    "choice_model": "mnl" | "mccm",
+    "choice_model": "mnl" | "mmnl" | "mccm",
     "utilities": [...],  # MNL only
     "outside_utility": float,  # MNL only
+    "mmnl_utilities": [[...], ...],  # MMNL only
+    "mmnl_type_probs": [...],  # MMNL only
     "mccm_initial_probs": [...],  # MCCM only
     "mccm_transition_matrix": [[...], ...],  # MCCM only
+    "mccm_concentration": float,  # MCCM random regime only
+    "mccm_sigma": float,  # MCCM alt regime only
+    "mccm_c_num": int,  # MCCM alt regime only
     "rewards": [...],
     "reward_no_purchase": 0.0,
     "assortment_policy": {...},
@@ -43,6 +49,15 @@ from typing import Any, Dict, List, Sequence
 
 import torch
 
+from mccm_generation import (
+    MCCMParameters,
+    sample_alt_mccm_parameters,
+    sample_mccm_parameters,
+)
+
+MMNL_NUM_TYPES = 5
+MMNL_TYPE_PROBS = [1.0 / MMNL_NUM_TYPES] * MMNL_NUM_TYPES
+
 
 @dataclass(frozen=True)
 class ChoiceModelConfig:
@@ -61,30 +76,13 @@ class ChoiceModelConfig:
     mcmc_burn_in: int
     mcmc_thinning: int
     mcmc_device: str
+    mccm_regime: str
     mccm_concentration: float
     utility_mean: float
     utility_std: float
     reward_low: float
     reward_high: float
     outside_utility: float
-
-
-def sample_dirichlet(rng: random.Random, concentration: float, size: int) -> List[float]:
-    if size <= 0:
-        raise ValueError("size must be positive.")
-    if concentration <= 0.0:
-        raise ValueError("concentration must be positive.")
-    draws = [rng.gammavariate(concentration, 1.0) for _ in range(size)]
-    total = sum(draws)
-    if total <= 0.0:
-        raise RuntimeError("Failed to sample a valid Dirichlet vector.")
-    return [x / total for x in draws]
-
-
-@dataclass(frozen=True)
-class MCCMParameters:
-    initial_probs: List[float]
-    transition_matrix: List[List[float]]
 
 
 def _emit_progress(prefix: str, current: int, total: int, *, width: int = 28) -> None:
@@ -101,30 +99,51 @@ def _emit_progress(prefix: str, current: int, total: int, *, width: int = 28) ->
     sys.stderr.flush()
 
 
-def sample_mccm_parameters(
+def sample_hard_mccm_parameters(
     rng: random.Random,
     n_products: int,
-    *,
-    concentration: float = 1.0,
 ) -> MCCMParameters:
-    """Sample a random absorbing Markov chain choice model."""
+    """Sample a structured MCCM that is intentionally hard for MNL.
+
+    The chain forms two opposing funnels. One half moves upward toward the
+    middle, while the other half moves downward from the far end. The middle
+    states bridge the two halves, so menu composition has a strong effect on
+    the final absorption probabilities.
+    """
     if n_products <= 0:
         raise ValueError("n_products must be positive.")
 
     n_states = n_products + 1
-    initial_probs = sample_dirichlet(rng, concentration, n_states)
-
     transition_matrix: List[List[float]] = [[0.0] * n_states for _ in range(n_states)]
     transition_matrix[0][0] = 1.0
-    for i in range(1, n_states):
-        row_without_self = sample_dirichlet(rng, concentration, n_states - 1)
+
+    if n_products == 1:
+        transition_matrix[1][0] = 1.0
+        return MCCMParameters(initial_probs=[0.5, 0.5], transition_matrix=transition_matrix)
+
+    mid_left = max(1, n_products // 2)
+    mid_right = min(n_products, mid_left + 1)
+    forward_mass = 0.93 + 0.04 * rng.random()
+    exit_mass = 1.0 - forward_mass
+
+    initial_probs = [0.0] * n_states
+    left_mass = 0.43 + 0.04 * rng.random()
+    right_mass = 0.43 + 0.04 * rng.random()
+    initial_probs[0] = max(0.0, 1.0 - left_mass - right_mass)
+    initial_probs[1] = left_mass
+    initial_probs[n_products] = right_mass
+
+    for i in range(1, n_products + 1):
         row = [0.0] * n_states
-        idx = 0
-        for j in range(n_states):
-            if j == i:
-                continue
-            row[j] = row_without_self[idx]
-            idx += 1
+        if i < mid_left:
+            row[i + 1] = forward_mass
+        elif i == mid_left:
+            row[mid_right] = forward_mass
+        elif i > mid_right:
+            row[i - 1] = forward_mass
+        else:
+            row[1] = forward_mass
+        row[0] = exit_mass
         transition_matrix[i] = row
 
     return MCCMParameters(
@@ -233,6 +252,136 @@ class MarkovChainChoiceModel:
         return int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
 
 
+class MixedMultinomialLogitChoiceModel:
+    """Finite-mixture multinomial logit model."""
+
+    def __init__(
+        self,
+        utilities_by_type: Sequence[Sequence[float]],
+        type_probs: Sequence[float],
+        rewards: Sequence[float],
+        *,
+        reward_no_purchase: float = 0.0,
+        outside_utility: float = 0.0,
+        device: torch.device | str = "cpu",
+        dtype: torch.dtype = torch.float64,
+    ) -> None:
+        device = torch.device(device)
+        utilities = torch.tensor(utilities_by_type, dtype=dtype, device=device)
+        type_probs_t = torch.tensor(type_probs, dtype=dtype, device=device)
+        rewards_t = torch.tensor(rewards, dtype=dtype, device=device)
+
+        if utilities.dim() != 2:
+            raise ValueError("utilities_by_type must have shape [C, N].")
+        if type_probs_t.dim() != 1:
+            raise ValueError("type_probs must be one-dimensional.")
+        if utilities.shape[0] != type_probs_t.numel():
+            raise ValueError("utilities_by_type and type_probs must agree on C.")
+        if rewards_t.numel() != utilities.shape[1]:
+            raise ValueError("rewards must have length N.")
+        if float(type_probs_t.sum().item()) <= 0.0:
+            raise ValueError("type_probs must sum to a positive value.")
+
+        self.device = device
+        self.dtype = dtype
+        self.utilities_by_type = utilities
+        self.type_probs = type_probs_t / type_probs_t.sum()
+        self.rewards = rewards_t
+        self.reward_no_purchase = float(reward_no_purchase)
+        self.outside_utility = float(outside_utility)
+        self.n_types = int(utilities.shape[0])
+        self.n_products = int(utilities.shape[1])
+        self._expected_reward_cache: Dict[tuple[int, ...], float] = {}
+
+    @property
+    def reward_vector(self) -> torch.Tensor:
+        return torch.cat(
+            [
+                torch.tensor(
+                    [self.reward_no_purchase], dtype=self.dtype, device=self.device
+                ),
+                self.rewards,
+            ],
+            dim=0,
+        )
+
+    def _type_choice_probabilities(
+        self, assortment: Sequence[int], type_idx: int
+    ) -> torch.Tensor:
+        if len(assortment) != self.n_products:
+            raise ValueError(
+                f"Expected assortment length {self.n_products}, got {len(assortment)}."
+            )
+        offered = [idx + 1 for idx, bit in enumerate(assortment) if int(bit)]
+        logits = [self.outside_utility] + [
+            float(self.utilities_by_type[type_idx, idx - 1].item()) for idx in offered
+        ]
+        max_logit = max(logits)
+        exp_logits = [math.exp(x - max_logit) for x in logits]
+        total = sum(exp_logits)
+        probs = [x / total for x in exp_logits]
+
+        full_probs = torch.zeros(self.n_products + 1, dtype=self.dtype, device=self.device)
+        full_probs[0] = probs[0]
+        for pos, product_idx in enumerate(offered, start=1):
+            full_probs[product_idx] = probs[pos]
+        return full_probs
+
+    def choice_probabilities(self, assortment: Sequence[int]) -> torch.Tensor:
+        probs = torch.zeros(self.n_products + 1, dtype=self.dtype, device=self.device)
+        for type_idx in range(self.n_types):
+            probs += self.type_probs[type_idx] * self._type_choice_probabilities(
+                assortment, type_idx
+            )
+        return probs
+
+    def expected_reward(self, assortment: Sequence[int]) -> float:
+        key = tuple(int(x) for x in assortment)
+        cached = self._expected_reward_cache.get(key)
+        if cached is not None:
+            return cached
+        probs = self.choice_probabilities(assortment)
+        value = float(torch.dot(probs, self.reward_vector).item())
+        self._expected_reward_cache[key] = value
+        return value
+
+    def batched_expected_reward(self, assortments: torch.Tensor) -> torch.Tensor:
+        if assortments.dim() == 1:
+            assortments = assortments.unsqueeze(0)
+        if assortments.dim() != 2:
+            raise ValueError("Expected assortments to have shape [N] or [B, N].")
+        values = [self.expected_reward(row.tolist()) for row in assortments]
+        return torch.tensor(values, dtype=torch.float32, device=assortments.device)
+
+    def sample_choice(self, rng: random.Random, assortment: Sequence[int]) -> int:
+        probs = self.choice_probabilities(assortment).tolist()
+        return int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
+
+
+def build_mmnl_model_from_meta(
+    meta: Dict[str, Any],
+    *,
+    device: torch.device | str = "cpu",
+) -> MixedMultinomialLogitChoiceModel:
+    utilities_by_type = meta.get("mmnl_utilities")
+    type_probs = meta.get("mmnl_type_probs")
+    rewards = meta.get("rewards")
+    if utilities_by_type is None:
+        raise ValueError("Metadata does not contain 'mmnl_utilities'.")
+    if type_probs is None:
+        raise ValueError("Metadata does not contain 'mmnl_type_probs'.")
+    if rewards is None:
+        raise ValueError("Metadata does not contain 'rewards'.")
+    return MixedMultinomialLogitChoiceModel(
+        utilities_by_type,
+        type_probs,
+        rewards,
+        reward_no_purchase=float(meta.get("reward_no_purchase", 0.0)),
+        outside_utility=float(meta.get("mmnl_outside_utility", 0.0)),
+        device=device,
+    )
+
+
 def build_mccm_model_from_meta(
     meta: Dict[str, Any],
     *,
@@ -262,10 +411,76 @@ def sample_utilities(
     return [rng.gauss(mean, std) for _ in range(n_products)]
 
 
+def sample_mmnl_utilities(
+    rng: random.Random,
+    n_products: int,
+    *,
+    num_types: int = MMNL_NUM_TYPES,
+) -> List[List[float]]:
+    if n_products <= 0:
+        raise ValueError("n_products must be positive.")
+    if num_types <= 0:
+        raise ValueError("num_types must be positive.")
+    if n_products % num_types != 0:
+        raise ValueError("MMNL generation requires n_products to be divisible by num_types.")
+
+    segment_size = n_products // num_types
+    utilities_by_type: List[List[float]] = []
+    for c in range(1, num_types + 1):
+        segment_start = (c - 1) * segment_size
+        segment_end = c * segment_size
+        mean_utility = c + segment_size
+        utilities: List[float] = []
+        for i in range(n_products):
+            if segment_start <= i < segment_end:
+                utilities.append(rng.gauss(mean_utility, 1.0))
+            else:
+                # Keep the off-block products unattractive, but not so extreme
+                # that the mixture becomes almost separable.
+                utilities.append(rng.gauss(-1.0, 1.0))
+        utilities_by_type.append(utilities)
+    return utilities_by_type
+
+
 def sample_rewards(
     rng: random.Random, n_products: int, low: float, high: float
 ) -> List[float]:
     return [rng.uniform(low, high) for _ in range(n_products)]
+
+
+def sample_hard_rewards(
+    rng: random.Random,
+    n_products: int,
+    low: float,
+    high: float,
+) -> List[float]:
+    """Sample a reward profile that emphasizes the bridge states in the hard regime."""
+    if n_products <= 0:
+        raise ValueError("n_products must be positive.")
+    if high <= low:
+        raise ValueError("high must be greater than low.")
+
+    span = high - low
+    if n_products == 1:
+        return [low + 0.9 * span]
+
+    mid_left = max(1, n_products // 2)
+    mid_right = min(n_products, mid_left + 1)
+    left_denom = max(1, mid_left - 1)
+    right_denom = max(1, n_products - mid_right)
+
+    rewards: List[float] = []
+    for idx in range(1, n_products + 1):
+        if idx <= mid_left:
+            depth = idx - 1
+            base = 0.2 + 0.8 * (depth / left_denom)
+        else:
+            depth = n_products - idx
+            base = 0.2 + 0.8 * (depth / right_denom)
+        jitter = 0.03 * (rng.random() - 0.5)
+        value = low + span * max(0.0, min(1.0, base + jitter))
+        rewards.append(value)
+    return rewards
 
 
 def sample_assortment(
@@ -371,6 +586,27 @@ def mnl_choice_probabilities(
     return full_probs
 
 
+def mmnl_choice_probabilities(
+    assortment: List[int],
+    utilities_by_type: Sequence[Sequence[float]],
+    type_probs: Sequence[float],
+    outside_utility: float = 0.0,
+) -> List[float]:
+    if not utilities_by_type:
+        raise ValueError("utilities_by_type must be non-empty.")
+    n_products = len(utilities_by_type[0])
+    full_probs = [0.0] * (n_products + 1)
+    total_type_prob = float(sum(type_probs))
+    if total_type_prob <= 0.0:
+        raise ValueError("type_probs must sum to a positive value.")
+
+    for type_prob, utilities in zip(type_probs, utilities_by_type):
+        probs = mnl_choice_probabilities(assortment, list(utilities), outside_utility)
+        for idx, prob in enumerate(probs):
+            full_probs[idx] += float(type_prob) * prob / total_type_prob
+    return full_probs
+
+
 def sample_choice(
     rng: random.Random,
     assortment: List[int],
@@ -381,6 +617,17 @@ def sample_choice(
     return int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
 
 
+def sample_mmnl_choice(
+    rng: random.Random,
+    assortment: List[int],
+    utilities_by_type: Sequence[Sequence[float]],
+    type_probs: Sequence[float],
+    outside_utility: float = 0.0,
+) -> int:
+    probs = mmnl_choice_probabilities(assortment, utilities_by_type, type_probs, outside_utility)
+    return int(rng.choices(range(len(probs)), weights=probs, k=1)[0])
+
+
 def expected_reward(
     assortment: List[int],
     utilities: List[float],
@@ -388,6 +635,17 @@ def expected_reward(
     outside_utility: float,
 ) -> float:
     probs = mnl_choice_probabilities(assortment, utilities, outside_utility)
+    return float(sum(p * r for p, r in zip(probs[1:], rewards)))
+
+
+def expected_reward_mmnl(
+    assortment: List[int],
+    utilities_by_type: Sequence[Sequence[float]],
+    rewards: List[float],
+    type_probs: Sequence[float],
+    outside_utility: float = 0.0,
+) -> float:
+    probs = mmnl_choice_probabilities(assortment, utilities_by_type, type_probs, outside_utility)
     return float(sum(p * r for p, r in zip(probs[1:], rewards)))
 
 
@@ -420,6 +678,43 @@ def batched_expected_reward(
     logits = torch.cat([outside_logits, product_logits], dim=-1)
     probs = torch.softmax(logits, dim=-1)
     return (probs * reward_vec.unsqueeze(0)).sum(dim=-1)
+
+
+def batched_expected_reward_mmnl(
+    assortments: torch.Tensor,
+    utilities_by_type: torch.Tensor,
+    rewards: torch.Tensor,
+    type_probs: torch.Tensor,
+    outside_utility: float = 0.0,
+) -> torch.Tensor:
+    """Vectorized expected reward for a batch of assortments under MMNL."""
+    if assortments.dim() == 1:
+        assortments = assortments.unsqueeze(0)
+    if assortments.dim() != 2:
+        raise ValueError("Expected assortments to have shape [N] or [B, N].")
+
+    device = assortments.device
+    mask = assortments.to(dtype=torch.bool)
+    utilities_by_type = utilities_by_type.to(device=device, dtype=torch.float32)
+    rewards = rewards.to(device=device, dtype=torch.float32)
+    type_probs = type_probs.to(device=device, dtype=torch.float32)
+    reward_vec = torch.cat(
+        [torch.zeros(1, dtype=torch.float32, device=device), rewards], dim=0
+    )
+
+    values = torch.zeros(mask.shape[0], dtype=torch.float32, device=device)
+    neg_inf = torch.tensor(float("-inf"), device=device)
+    for type_idx in range(utilities_by_type.shape[0]):
+        utilities = utilities_by_type[type_idx]
+        product_logits = utilities.unsqueeze(0).expand(mask.shape[0], -1)
+        product_logits = torch.where(mask, product_logits, neg_inf)
+        outside_logits = torch.full(
+            (mask.shape[0], 1), outside_utility, dtype=torch.float32, device=device
+        )
+        logits = torch.cat([outside_logits, product_logits], dim=-1)
+        probs = torch.softmax(logits, dim=-1)
+        values += type_probs[type_idx] * (probs * reward_vec.unsqueeze(0)).sum(dim=-1)
+    return values
 
 
 def sample_boltzmann_assortment_exact(
@@ -541,25 +836,54 @@ def sample_boltzmann_assortments_gibbs(
 def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
     rng = random.Random(config.seed)
     torch.manual_seed(config.seed)
-    utilities = sample_utilities(
-        rng, config.n_products, config.utility_mean, config.utility_std
-    )
-    rewards = sample_rewards(
-        rng, config.n_products, config.reward_low, config.reward_high
+    utilities: List[float] = []
+    mmnl_utilities: List[List[float]] | None = None
+    if config.choice_model == "mnl":
+        utilities = sample_utilities(
+            rng, config.n_products, config.utility_mean, config.utility_std
+        )
+    elif config.choice_model == "mmnl":
+        mmnl_utilities = sample_mmnl_utilities(rng, config.n_products)
+    if config.choice_model == "mccm" and config.mccm_regime == "hard":
+        rewards = sample_hard_rewards(
+            rng, config.n_products, config.reward_low, config.reward_high
+        )
+    else:
+        rewards = sample_rewards(
+            rng, config.n_products, config.reward_low, config.reward_high
     )
     mccm_params: MCCMParameters | None = None
     mccm_model: MarkovChainChoiceModel | None = None
+    mmnl_model: MixedMultinomialLogitChoiceModel | None = None
     if config.choice_model == "mccm":
-        mccm_params = sample_mccm_parameters(
-            rng,
-            config.n_products,
-            concentration=config.mccm_concentration,
-        )
+        if config.mccm_regime == "hard":
+            mccm_params = sample_hard_mccm_parameters(rng, config.n_products)
+        elif config.mccm_regime == "random":
+            mccm_params = sample_mccm_parameters(
+                rng,
+                config.n_products,
+                concentration=config.mccm_concentration,
+            )
+        elif config.mccm_regime == "alt":
+            mccm_params = sample_alt_mccm_parameters(rng, config.n_products)
+        else:
+            raise ValueError(
+                f"Unknown MCCM regime {config.mccm_regime!r}. Supported regimes: 'random', 'hard', 'alt'."
+            )
         mccm_model = MarkovChainChoiceModel(
             mccm_params.initial_probs,
             mccm_params.transition_matrix,
             rewards,
             reward_no_purchase=0.0,
+        )
+    elif config.choice_model == "mmnl":
+        assert mmnl_utilities is not None
+        mmnl_model = MixedMultinomialLogitChoiceModel(
+            mmnl_utilities,
+            MMNL_TYPE_PROBS,
+            rewards,
+            reward_no_purchase=0.0,
+            outside_utility=0.0,
         )
 
     data: List[Dict[str, Any]] = []
@@ -594,6 +918,45 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
                 config.boltzmann_beta,
             )
 
+    elif config.choice_model == "mmnl":
+        assert mmnl_model is not None
+        assert mmnl_utilities is not None
+        mmnl_utilities_t = torch.tensor(mmnl_utilities, dtype=torch.float32)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        type_probs_t = torch.tensor(MMNL_TYPE_PROBS, dtype=torch.float32)
+
+        def batched_reward_fn(assortments: torch.Tensor) -> torch.Tensor:
+            return batched_expected_reward_mmnl(
+                assortments,
+                mmnl_utilities_t,
+                rewards_t,
+                type_probs_t,
+                0.0,
+            )
+
+        def sample_choice_fn(assortment: List[int]) -> int:
+            return sample_mmnl_choice(
+                rng,
+                assortment,
+                mmnl_utilities,
+                MMNL_TYPE_PROBS,
+                0.0,
+            )
+
+        def exact_boltzmann_fn() -> List[int]:
+            return sample_boltzmann_assortment_exact_from_fn(
+                rng,
+                config.n_products,
+                lambda assortment: expected_reward_mmnl(
+                    assortment,
+                    mmnl_utilities,
+                    rewards,
+                    MMNL_TYPE_PROBS,
+                    0.0,
+                ),
+                config.boltzmann_beta,
+            )
+
     elif config.choice_model == "mccm":
         assert mccm_model is not None
 
@@ -613,7 +976,7 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
 
     else:
         raise ValueError(
-            f"Unknown choice_model {config.choice_model!r}. Supported models: 'mnl', 'mccm'."
+            f"Unknown choice_model {config.choice_model!r}. Supported models: 'mnl', 'mmnl', 'mccm'."
         )
 
     show_loop_progress = not (
@@ -661,6 +1024,7 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
     meta = {
         "N": config.n_products,
         "choice_model": config.choice_model,
+        "mccm_regime": config.mccm_regime if config.choice_model == "mccm" else None,
         "rewards": rewards,
         "reward_no_purchase": 0.0,
         "assortment_policy": {
@@ -681,18 +1045,28 @@ def generate_dataset(config: ChoiceModelConfig) -> Dict[str, Any]:
     if config.choice_model == "mnl":
         meta["utilities"] = utilities
         meta["outside_utility"] = config.outside_utility
+    elif config.choice_model == "mmnl":
+        assert mmnl_utilities is not None
+        meta["mmnl_num_types"] = MMNL_NUM_TYPES
+        meta["mmnl_type_probs"] = MMNL_TYPE_PROBS
+        meta["mmnl_utilities"] = mmnl_utilities
+        meta["mmnl_outside_utility"] = 0.0
     else:
         assert mccm_params is not None
         meta["mccm_initial_probs"] = mccm_params.initial_probs
         meta["mccm_transition_matrix"] = mccm_params.transition_matrix
-        meta["mccm_concentration"] = config.mccm_concentration
+        if config.mccm_regime == "random":
+            meta["mccm_concentration"] = config.mccm_concentration
+        elif config.mccm_regime == "alt":
+            meta["mccm_sigma"] = config.n_products / 10.0
+            meta["mccm_c_num"] = config.n_products // 5
 
     return {"meta": meta, "data": data}
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate synthetic assortment-choice data under an MNL or MCCM model."
+        description="Generate synthetic assortment-choice data under an MNL, MMNL, or MCCM model."
     )
     parser.add_argument("--output", type=Path, required=True, help="Output JSON path.")
     parser.add_argument("--n-products", type=int, default=20, help="Number of products.")
@@ -702,7 +1076,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--choice-model",
         type=str,
         default="mnl",
-        choices=("mnl", "mccm"),
+        choices=("mnl", "mmnl", "mccm"),
         help="Choice model used to sample customer actions.",
     )
     parser.add_argument(
@@ -761,10 +1135,17 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Torch device for MCMC sampling, e.g. 'cpu' or 'cuda'.",
     )
     parser.add_argument(
+        "--mccm-regime",
+        type=str,
+        default="random",
+        choices=("random", "hard", "alt"),
+        help="MCCM parameter regime. 'hard' uses structured funnel dynamics that are harder for MNL to mimic; 'alt' uses the grouped Gaussian-softmax regime.",
+    )
+    parser.add_argument(
         "--mccm-concentration",
         type=float,
         default=1.0,
-        help="Dirichlet concentration used to sample MCCM initial and transition probabilities.",
+        help="Dirichlet concentration used to sample MCCM initial and transition probabilities in the random regime.",
     )
     parser.add_argument(
         "--utility-mean",
@@ -806,8 +1187,8 @@ def main() -> None:
         raise ValueError("--n-products must be positive.")
     if args.n_samples <= 0:
         raise ValueError("--n-samples must be positive.")
-    if args.choice_model not in ("mnl", "mccm"):
-        raise ValueError("--choice-model must be one of: mnl, mccm.")
+    if args.choice_model not in ("mnl", "mmnl", "mccm"):
+        raise ValueError("--choice-model must be one of: mnl, mmnl, mccm.")
     if args.assortment_policy == "uniform_k_subset":
         if args.assortment_size is None:
             args.assortment_size = min(5, args.n_products)
@@ -822,8 +1203,14 @@ def main() -> None:
             args.boltzmann_sampler = "exact" if args.n_products <= 20 else "mcmc"
     if args.reward_high <= args.reward_low:
         raise ValueError("--reward-high must be greater than --reward-low.")
-    if args.choice_model == "mccm" and args.mccm_concentration <= 0:
+    if args.choice_model == "mccm" and args.mccm_regime == "random" and args.mccm_concentration <= 0:
         raise ValueError("--mccm-concentration must be positive.")
+    if args.choice_model == "mccm" and args.mccm_regime not in ("random", "hard", "alt"):
+        raise ValueError("--mccm-regime must be one of: random, hard, alt.")
+    if args.choice_model == "mccm" and args.mccm_regime == "alt" and args.n_products % 5 != 0:
+        raise ValueError("--mccm-regime alt requires --n-products to be divisible by 5.")
+    if args.choice_model == "mmnl" and args.n_products % MMNL_NUM_TYPES != 0:
+        raise ValueError("--choice-model mmnl requires --n-products to be divisible by 5.")
     if args.boltzmann_sampler == "exact" and args.n_products > 24:
         raise ValueError(
             "Exact Boltzmann enumeration is not practical for this N; use --boltzmann-sampler mcmc."
@@ -849,6 +1236,7 @@ def main() -> None:
         mcmc_burn_in=args.mcmc_burn_in,
         mcmc_thinning=args.mcmc_thinning,
         mcmc_device=args.mcmc_device,
+        mccm_regime=args.mccm_regime,
         mccm_concentration=args.mccm_concentration,
         utility_mean=args.utility_mean,
         utility_std=args.utility_std,

@@ -30,7 +30,7 @@ from evaluate_assortment import (
     load_assortment_json,
     load_policy_from_checkpoint,
 )
-from generate_assortment_data import build_mccm_model_from_meta
+from generate_assortment_data import build_mccm_model_from_meta, build_mmnl_model_from_meta
 
 
 def bits_to_assortment(mask: int, n_products: int) -> list[int]:
@@ -114,6 +114,14 @@ def build_policy_kind(
 
         return true_policy
 
+    if policy == "true_mmnl":
+        model = build_mmnl_model_from_meta(meta)
+
+        def true_policy(S: Sequence[int]) -> list[float]:
+            return [float(p) for p in model.choice_probabilities(S).tolist()]
+
+        return true_policy
+
     if policy == "model":
         if checkpoint is None:
             raise ValueError("--checkpoint is required when --policy model is used.")
@@ -125,7 +133,7 @@ def build_policy_kind(
 
         return model_policy
 
-    raise ValueError("--policy must be one of: true_mnl, true_mccm, model.")
+    raise ValueError("--policy must be one of: true_mnl, true_mmnl, true_mccm, model.")
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -142,7 +150,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--policy",
         type=str,
         default="true_mnl",
-        choices=("true_mnl", "true_mccm", "model"),
+        choices=("true_mnl", "true_mmnl", "true_mccm", "model"),
         help="Use the true policy from metadata or a trained checkpoint.",
     )
     parser.add_argument(
