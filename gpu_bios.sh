@@ -11,14 +11,11 @@
 #SBATCH --mail-user=xj58@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 
-set -euo pipefail
-
 # ---------------------------
 # Env
 # ---------------------------
 source ~/.bashrc
-conda activate diffusion_assort
-export PYTHONPATH="${PYTHONPATH:-}:."
+conda activate SpaRest
 
 # ---------------------------
 # Config
