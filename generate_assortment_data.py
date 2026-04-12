@@ -509,9 +509,20 @@ def sample_assortment(
             mask[rng.randrange(n_products)] = 1
         return mask
 
+    if policy == "uniform_size_then_subset":
+        # Draw k uniformly from {1, ..., N}, then draw a subset uniformly from
+        # all combinations of size k.
+        k = rng.randint(1, n_products)
+        idx = rng.sample(range(n_products), k=k)
+        mask = [0] * n_products
+        for j in idx:
+            mask[j] = 1
+        return mask
+
     raise ValueError(
         f"Unknown assortment policy {policy!r}. "
-        "Supported policies: 'uniform_k_subset', 'bernoulli', 'boltzmann'."
+        "Supported policies: 'uniform_k_subset', 'bernoulli', 'boltzmann', "
+        "'uniform_size_then_subset'."
     )
 
 
@@ -1083,7 +1094,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--assortment-policy",
         type=str,
         default="uniform_k_subset",
-        choices=("uniform_k_subset", "bernoulli", "boltzmann"),
+        choices=("uniform_k_subset", "bernoulli", "boltzmann", "uniform_size_then_subset"),
         help="How to sample assortments.",
     )
     parser.add_argument(
