@@ -38,9 +38,9 @@ DIFFUSION_STEPS=100
 TRAIN_SEED=42
 
 # Toggle phases if needed.
-RUN_DATA_GENERATION=1
-RUN_DIFFUSION_TRAIN=1
-RUN_CHOICE_MODEL_TRAIN=1
+RUN_DATA_GENERATION=0
+RUN_DIFFUSION_TRAIN=0
+RUN_CHOICE_MODEL_TRAIN=0
 RUN_OPTIMAL_RATIO_EVAL=1
 
 EVAL_NUM_SAMPLES=256
@@ -226,10 +226,12 @@ if [[ "${RUN_OPTIMAL_RATIO_EVAL}" -eq 1 ]]; then
       done
     fi
 
-    # 3) Aggregate optimal ratio mean/std for this setting and each method.
+    # 3) Aggregate per-seed distribution stats (mean/q50/q90/max) of optimal ratios,
+    # then compute cross-seed mean/std for each stat and method.
     DATASET="${dataset}" SETTING_DIR="${setting_dir}" EVAL_NUM_SAMPLES="${EVAL_NUM_SAMPLES}" python - <<'PY'
 import glob
 import json
+import math
 import os
 import statistics
 
@@ -242,26 +244,56 @@ with open(os.path.join(setting_dir, "true_optimum.json"), "r", encoding="utf-8")
 if true_opt <= 0.0:
     raise ValueError(f"true optimal value must be positive, got {true_opt}.")
 
-def aggregate(method: str, pattern: str, value_key: str) -> None:
+def quantile(values, q):
+    if not values:
+        return float("nan")
+    xs = sorted(float(v) for v in values)
+    if len(xs) == 1:
+        return xs[0]
+    pos = (len(xs) - 1) * float(q)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return xs[lo]
+    w = pos - lo
+    return xs[lo] * (1.0 - w) + xs[hi] * w
+
+def aggregate(method: str, pattern: str, reward_list_key: str = "true_expected_rewards") -> None:
     seed_paths = sorted(glob.glob(os.path.join(setting_dir, pattern)))
     if not seed_paths:
         return
 
     rows = []
-    ratios = []
+    seed_mean = []
+    seed_q50 = []
+    seed_q90 = []
+    seed_max = []
     for path in seed_paths:
         with open(path, "r", encoding="utf-8") as f:
             obj = json.load(f)
         seed = int(obj["seed"])
-        method_value = float(obj[value_key])
-        ratio = method_value / true_opt
-        ratios.append(ratio)
+        rewards = obj.get(reward_list_key)
+        if rewards is None:
+            raise ValueError(f"{path} does not contain '{reward_list_key}'.")
+        ratios = [float(r) / true_opt for r in rewards]
+        if not ratios:
+            raise ValueError(f"{path} has empty rewards list.")
+        r_mean = float(statistics.fmean(ratios))
+        r_q50 = float(quantile(ratios, 0.5))
+        r_q90 = float(quantile(ratios, 0.9))
+        r_max = float(max(ratios))
+        seed_mean.append(r_mean)
+        seed_q50.append(r_q50)
+        seed_q90.append(r_q90)
+        seed_max.append(r_max)
         rows.append(
             {
                 "seed": seed,
-                "method_best_true_reward": method_value,
+                "seed_mean_optimal_ratio": r_mean,
+                "seed_q50_optimal_ratio": r_q50,
+                "seed_q90_optimal_ratio": r_q90,
+                "seed_max_optimal_ratio": r_max,
                 "true_optimal_value": true_opt,
-                "optimal_ratio": ratio,
                 "result_path": path,
             }
         )
@@ -269,12 +301,16 @@ def aggregate(method: str, pattern: str, value_key: str) -> None:
     summary = {
         "dataset": dataset,
         "method": method,
-        "num_seeds": len(ratios),
+        "num_seeds": len(rows),
         "num_samples_per_seed": eval_num_samples,
-        "mean_optimal_ratio": float(statistics.fmean(ratios)),
-        "std_optimal_ratio": float(statistics.stdev(ratios)) if len(ratios) >= 2 else 0.0,
-        "min_optimal_ratio": float(min(ratios)),
-        "max_optimal_ratio": float(max(ratios)),
+        "mean_of_seed_mean_ratio": float(statistics.fmean(seed_mean)),
+        "std_of_seed_mean_ratio": float(statistics.stdev(seed_mean)) if len(seed_mean) >= 2 else 0.0,
+        "mean_of_seed_q50_ratio": float(statistics.fmean(seed_q50)),
+        "std_of_seed_q50_ratio": float(statistics.stdev(seed_q50)) if len(seed_q50) >= 2 else 0.0,
+        "mean_of_seed_q90_ratio": float(statistics.fmean(seed_q90)),
+        "std_of_seed_q90_ratio": float(statistics.stdev(seed_q90)) if len(seed_q90) >= 2 else 0.0,
+        "mean_of_seed_max_ratio": float(statistics.fmean(seed_max)),
+        "std_of_seed_max_ratio": float(statistics.stdev(seed_max)) if len(seed_max) >= 2 else 0.0,
         "rows": rows,
     }
     with open(
@@ -285,9 +321,9 @@ def aggregate(method: str, pattern: str, value_key: str) -> None:
         json.dump(summary, f, indent=2)
         f.write("\n")
 
-aggregate("unguided", "unguided_seed_*.json", "best_true_reward")
-aggregate("guided_gasn", "guided_gasn_seed_*.json", "best_guided_true_expected_reward")
-aggregate("guided_rasn", "guided_rasn_seed_*.json", "best_guided_true_expected_reward")
+aggregate("unguided", "unguided_seed_*.json")
+aggregate("guided_gasn", "guided_gasn_seed_*.json")
+aggregate("guided_rasn", "guided_rasn_seed_*.json")
 PY
   done
 
@@ -321,10 +357,14 @@ for p in summary_paths:
             "N": N,
             "num_seeds": int(obj["num_seeds"]),
             "num_samples_per_seed": eval_num_samples,
-            "mean_optimal_ratio": float(obj["mean_optimal_ratio"]),
-            "std_optimal_ratio": float(obj["std_optimal_ratio"]),
-            "min_optimal_ratio": float(obj["min_optimal_ratio"]),
-            "max_optimal_ratio": float(obj["max_optimal_ratio"]),
+            "mean_of_seed_mean_ratio": float(obj["mean_of_seed_mean_ratio"]),
+            "std_of_seed_mean_ratio": float(obj["std_of_seed_mean_ratio"]),
+            "mean_of_seed_q50_ratio": float(obj["mean_of_seed_q50_ratio"]),
+            "std_of_seed_q50_ratio": float(obj["std_of_seed_q50_ratio"]),
+            "mean_of_seed_q90_ratio": float(obj["mean_of_seed_q90_ratio"]),
+            "std_of_seed_q90_ratio": float(obj["std_of_seed_q90_ratio"]),
+            "mean_of_seed_max_ratio": float(obj["mean_of_seed_max_ratio"]),
+            "std_of_seed_max_ratio": float(obj["std_of_seed_max_ratio"]),
             "summary_path": p,
         }
     )
@@ -344,10 +384,14 @@ fieldnames = [
     "N",
     "num_seeds",
     "num_samples_per_seed",
-    "mean_optimal_ratio",
-    "std_optimal_ratio",
-    "min_optimal_ratio",
-    "max_optimal_ratio",
+    "mean_of_seed_mean_ratio",
+    "std_of_seed_mean_ratio",
+    "mean_of_seed_q50_ratio",
+    "std_of_seed_q50_ratio",
+    "mean_of_seed_q90_ratio",
+    "std_of_seed_q90_ratio",
+    "mean_of_seed_max_ratio",
+    "std_of_seed_max_ratio",
     "summary_path",
 ]
 with open(csv_path, "w", newline="", encoding="utf-8") as f:
