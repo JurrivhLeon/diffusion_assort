@@ -54,7 +54,15 @@ def main() -> None:
     meta = dataset["meta"]
     diffusion = _load_diffusion_checkpoint(args.checkpoint, device=args.device)
     reward_fn = build_reward_fn(None)
-    true_reward_fn = build_batched_expected_reward_fn(meta, reward_fn, "true_mnl", None, device=args.device)
+    if meta.get("choice_model") == "mccm":
+        true_policy_kind = "true_mccm"
+    elif meta.get("choice_model") == "mmnl":
+        true_policy_kind = "true_mmnl"
+    else:
+        true_policy_kind = "true_mnl"
+    true_reward_fn = build_batched_expected_reward_fn(
+        meta, reward_fn, true_policy_kind, None, device=args.device
+    )
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
