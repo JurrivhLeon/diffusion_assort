@@ -25,8 +25,8 @@ from typing import Callable, Sequence
 import torch
 
 from assortment_dataset import load_assortment_json
-from choice_models import GAsN, RAsN, TCNet
-from generate_assortment_data import build_mccm_model_from_meta, build_mmnl_model_from_meta
+from choice_models import GAsN, MNL, RAsN
+from generate_assortment_data import build_mccm_model_from_meta
 
 
 RewardFn = Callable[[Sequence[int], int, dict], float]
@@ -254,6 +254,8 @@ def load_policy_from_checkpoint(
         if hidden_sizes is None:
             hidden_sizes = [n_products]
         model = GAsN(n_products=n_products, hidden_sizes=hidden_sizes)
+    elif model_name == "mnl":
+        model = MNL(n_products=n_products)
     elif model_name == "rasn":
         num_blocks = int(num_blocks) if num_blocks is not None else 1
         if hidden_sizes is None:

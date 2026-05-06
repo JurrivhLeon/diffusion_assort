@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 from assortment_dataset import AssortmentChoiceDataset
-from choice_models import GAsN, RAsN, TCNet
+from choice_models import GAsN, MNL, RAsN
 
 
 @dataclass
@@ -39,46 +39,13 @@ def build_model(
 ) -> torch.nn.Module:
     if model_name == "gasn":
         return GAsN(n_products=n_products, hidden_sizes=hidden_sizes)
+    if model_name == "mnl":
+        return MNL(n_products=n_products)
     if model_name == "rasn":
         if num_blocks <= 0:
             raise ValueError("--num-blocks must be positive.")
-        return RAsN(n_products=n_products, hidden_sizes=hidden_sizes, num_blocks=num_blocks)
-    if model_name == "tcn":
-        if tcn_config is None:
-            raise ValueError("tcn_config must be provided when --model tcn is used.")
-        return TCNet(n_products=n_products, **tcn_config)
-    raise ValueError("--model must be one of: gasn, rasn, tcn.")
-
-
-def build_tcn_config(args: argparse.Namespace, n_products: int) -> dict:
-    embedding_dim = n_products if args.tcn_embedding_dim is None else int(args.tcn_embedding_dim)
-    if embedding_dim <= 0:
-        raise ValueError("--tcn-embedding-dim must be positive.")
-
-    num_layers = int(args.tcn_num_layers)
-    if num_layers <= 0:
-        raise ValueError("--tcn-num-layers must be positive.")
-
-    num_heads = int(args.tcn_num_heads)
-    if num_heads <= 0:
-        raise ValueError("--tcn-num-heads must be positive.")
-
-    ffn_dim = 4 * embedding_dim if args.tcn_ffn_dim is None else int(args.tcn_ffn_dim)
-    if ffn_dim <= 0:
-        raise ValueError("--tcn-ffn-dim must be positive.")
-
-    dropout = float(args.tcn_dropout)
-    if dropout < 0.0 or dropout >= 1.0:
-        raise ValueError("--tcn-dropout must be in [0, 1).")
-
-    return {
-        "embedding_dim": embedding_dim,
-        "num_layers": num_layers,
-        "num_heads": num_heads,
-        "ffn_dim": ffn_dim,
-        "dropout": dropout,
-        "learnable_outside_logit": True,
-    }
+        return RAsN(n_products=n_products, num_blocks=num_blocks)
+    raise ValueError("--model must be one of: gasn, mnl, rasn.")
 
 
 def build_run_config(
@@ -170,21 +137,21 @@ def train_one_epoch(
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train GAsN, RAsN, or TCNet on assortment-choice JSON data."
+        description="Train GAsN, MNL, or RAsN on assortment-choice JSON data."
     )
     parser.add_argument("--data", type=Path, required=True, help="Path to JSON dataset.")
     parser.add_argument(
         "--model",
         type=str,
         default="gasn",
-        choices=("gasn", "rasn", "tcn"),
+        choices=("gasn", "mnl", "rasn"),
         help="Choice model architecture.",
     )
     parser.add_argument(
         "--hidden-sizes",
         type=str,
         default=None,
-        help="Comma-separated hidden sizes for GAsN/RAsN, e.g. '64,64'. Default: 'N'. Ignored for TCN.",
+        help="Comma-separated hidden sizes for GAsN, e.g. '64,64'. Default: 'N'. Ignored for MNL/RAsN.",
     )
     parser.add_argument(
         "--num-blocks",
