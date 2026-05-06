@@ -98,3 +98,25 @@ Research code for assortment data generation, choice-model training, diffusion-b
 
 - Generated datasets, model checkpoints, and large outputs are not tracked by default.
 - Use per-script `--help` to see exact CLI options and defaults.
+
+## Mapping to Appendix Experiments
+
+- B.1 Implementation Details and Runtime
+  - `train_choice_model.py`, `train_bernoulli_diffusion.py`, `sample_guided_diffusion.py`, `sample_unguided_diffusion.py`
+  - These scripts define model/training/guidance configurations and are the source of runtime logs.
+
+- B.2 Detailed Optimal-Ratio Results
+  - `evaluate_assortment.py`, `mnl_optimize_assortment.py`, `mmnl_optimize_assortment.py`, `mccm_optimize_assortment.py`, `mccm_em_optimize_assortment.py`, `summarize_mnl_experiment.py`, `summarize_mnl_suite.py`
+  - Optimization scripts provide model-specific optima; evaluation and summary scripts produce detailed optimal-ratio statistics.
+
+- B.3 Exact Recovery and Diversity
+  - `sample_guided_diffusion.py`, `sample_unguided_diffusion.py`, `evaluate_assortment.py`, `exhaustive_search_assortment.py`
+  - Sampling scripts generate candidate assortments; exhaustive/evaluation scripts compute exact-recovery and diversity-related metrics.
+
+- B.4 Sample Efficiency
+  - `generate_assortment_data.py`, `train_choice_model.py`, `train_bernoulli_diffusion.py`, `evaluate_assortment.py`
+  - Vary offline dataset size in generation, then train/evaluate to measure sample-efficiency trends.
+
+- B.5 Distribution Shift
+  - `generate_assortment_data.py`, `sample_guided_diffusion.py`, `sample_unguided_diffusion.py`, `evaluate_assortment.py`
+  - Distribution shift is introduced at data generation; robustness is measured through downstream sampling and evaluation.
