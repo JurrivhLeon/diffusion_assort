@@ -252,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--choice-models", help="Comma-separated override, e.g. mnl,mmnl.")
+    parser.add_argument(
+        "--reward-models",
+        help="Comma-separated fitted reward models to train/optimize: gasn,rasn.",
+    )
     parser.add_argument("--n-products", help="Comma-separated override, e.g. 20,40,100.")
     parser.add_argument("--betas", help="Comma-separated override, e.g. 0.1,1.0.")
     parser.add_argument("--seeds", help="Comma-separated override, e.g. 0,1,2.")
@@ -271,6 +275,7 @@ def main() -> None:
     args = build_parser().parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
     choice_models = _csv_values(args.choice_models, str) or config["choice_models"]
+    reward_models = _csv_values(args.reward_models, str) or ["gasn", "rasn"]
     n_products_values = _csv_values(args.n_products, int) or config["n_products"]
     betas = _csv_values(args.betas, float) or config["betas"]
     seeds = _csv_values(args.seeds, int) or config["seeds"]
@@ -281,6 +286,9 @@ def main() -> None:
     unknown_models = set(choice_models) - {"mnl", "mccm", "mmnl"}
     if unknown_models:
         raise ValueError(f"Unsupported data-generating choice models: {sorted(unknown_models)}")
+    unknown_reward_models = set(reward_models) - {"gasn", "rasn"}
+    if unknown_reward_models:
+        raise ValueError(f"Unsupported fitted reward models: {sorted(unknown_reward_models)}")
     if any(value <= 0 for value in n_products_values):
         raise ValueError("All --n-products values must be positive.")
     if "mip" in args.stages and not args.dry_run:
@@ -313,7 +321,7 @@ def main() -> None:
         elif not dataset_path.exists() and not args.dry_run:
             raise FileNotFoundError(f"Missing dataset required by later stages: {dataset_path}")
 
-        for model_name in ("gasn", "rasn"):
+        for model_name in reward_models:
             model_dir = case_dir / model_name
             checkpoint_path = model_dir / "best.pt"
             if "train" in args.stages:
@@ -355,7 +363,8 @@ def main() -> None:
         _write_json(manifest_path, manifest)
     stage_summary = ", ".join(args.stages)
     print(
-        f"Prepared {len(manifest['cases'])} dataset cases with two neural model variants; "
+        f"Prepared {len(manifest['cases'])} dataset cases with reward models "
+        f"{','.join(reward_models)}; "
         f"requested stages: {stage_summary}."
     )
 

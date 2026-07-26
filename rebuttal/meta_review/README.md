@@ -62,15 +62,45 @@ The lower-level Python runner defaults to repository-local ignored data/output d
 
 ## Formal MIP-versus-D3AO experiment
 
-The formal launcher defaults to the main MMNL misspecification setting with \(N=100\), both submitted behavior-policy temperatures, 10 dataset seeds, and 10 D3AO sampling seeds:
+The formal workflow is split into five independent, non-array SLURM scripts. Every submission handles exactly one explicitly specified dataset/model/seed combination. No script expands an experimental grid internally.
+
+| Stage | Script | One submission handles |
+|---|---|---|
+| 1 | `01_generate_data.sh` | One dataset |
+| 2 | `02_train_choice_models.sh` | One GAsN or RAsN checkpoint |
+| 3 | `03_train_diffusion.sh` | One diffusion checkpoint |
+| 4 | `04_run_mip.sh` | One MIP solve |
+| 5 | `05_run_d3ao.sh` | One D3AO sampling run |
+
+Specify a single case through exported variables. For example, generate the MMNL, \(N=100\), \(\beta=1\), dataset-seed-0 data:
 
 ```bash
-sbatch rebuttal/meta_review/scripts/run_formal_mip_vs_d3ao.sh
+sbatch --export=ALL,CHOICE_MODEL=mmnl,N_PRODUCT=100,BETA=1.0,DATA_SEED=0 \
+  rebuttal/meta_review/scripts/01_generate_data.sh
 ```
 
-The tracked script requests the `biostat` partition/account, 20 CPU cores, 200 GB memory, and a 20-hour wall-clock limit per task. It uses the array specification `0-19%5`: the default 20 combinations of two behavior-policy temperatures and ten dataset seeds are split into independent jobs, with at most five running concurrently. Each task runs both reward models and all configured D3AO sampling seeds for one dataset. SLURM stdout/stderr are written under `/hpc/group/xielab/xj58/sbatch_output/`, and job notifications are sent to `xj58@duke.edu`.
+Train one GAsN checkpoint for that dataset:
 
-The job initializes Conda explicitly and activates the `SpaRest` environment before running any command. Set `CONDA_ENV` at submission time only if a different environment is required. The job checks PyTorch immediately and, when `RUN_MIP=1`, also checks `gurobipy` before starting data generation or training.
+```bash
+sbatch --export=ALL,CHOICE_MODEL=mmnl,N_PRODUCT=100,BETA=1.0,DATA_SEED=0,REWARD_MODEL=gasn \
+  rebuttal/meta_review/scripts/02_train_choice_models.sh
+```
+
+Run one GAsN MIP after that checkpoint exists:
+
+```bash
+sbatch --export=ALL,CHOICE_MODEL=mmnl,N_PRODUCT=100,BETA=1.0,DATA_SEED=0,REWARD_MODEL=gasn \
+  rebuttal/meta_review/scripts/04_run_mip.sh
+```
+
+Run one GAsN-guided D3AO sampling replicate:
+
+```bash
+sbatch --export=ALL,CHOICE_MODEL=mmnl,N_PRODUCT=100,BETA=1.0,DATA_SEED=0,REWARD_MODEL=gasn,SAMPLING_SEED=0 \
+  rebuttal/meta_review/scripts/05_run_d3ao.sh
+```
+
+Every script requests the `biostat` partition/account, 20 CPU cores, 200 GB memory, and a 20-hour wall-clock limit. SLURM logs are written under `/hpc/group/xielab/xj58/sbatch_output/`. The shared helper initializes Conda and activates `SpaRest` before running commands.
 
 Formal experiment artifacts are stored outside the repository under:
 
@@ -80,20 +110,11 @@ Formal experiment artifacts are stored outside the repository under:
 └── outputs/    # Checkpoints, manifests, logs, MIP results, and D3AO samples
 ```
 
-The launcher creates both directories automatically. Override the common root with `ARTIFACT_ROOT`, or override `DATA_ROOT` and `OUTPUT_ROOT` separately when needed.
+Each stage creates both directories automatically. Override the common root with `ARTIFACT_ROOT`, or override `DATA_ROOT` and `OUTPUT_ROOT` separately when needed.
 
 Its primary comparison is GAsN-reward MIP versus GAsN-guided D3AO, and RAsN-reward MIP versus RAsN-guided D3AO. Each D3AO run generates 256 candidates and returns the candidate selected by fitted reward. Ground-truth reward is used only for post-selection evaluation.
 
-Environment variables can reduce or extend the grid without editing the script:
-
-```bash
-sbatch --export=ALL,CHOICE_MODELS=mnl,N_PRODUCTS=20,BETAS=1.0,DATA_SEEDS=0,SAMPLING_SEEDS=0,N_SAMPLES=1000,DEVICE=cpu,RUN_MIP=0 \
-  rebuttal/meta_review/scripts/run_formal_mip_vs_d3ao.sh
-```
-
-The static SBATCH array contains 20 task IDs. If an override defines fewer than 20 data configurations, extra tasks exit successfully without doing work. If an override defines more than 20 configurations, also override the array range at submission time. For example, a 30-case grid requires `sbatch --array=0-29%5 ...`.
-
-Useful overrides are `PYTHON_BIN`, `CONDA_ENV`, `CHOICE_MODELS`, `N_PRODUCTS`, `BETAS`, `DATA_SEEDS`, `SAMPLING_SEEDS`, `N_SAMPLES`, `DEVICE`, `NUM_CANDIDATES`, `GUIDANCE_SCALE`, `GUIDANCE_GAMMA`, `RUN_MIP`, `FORCE`, `ARTIFACT_ROOT`, `DATA_ROOT`, and `OUTPUT_ROOT`.
+Useful inputs are `CHOICE_MODEL`, `N_PRODUCT`, `BETA`, `DATA_SEED`, `REWARD_MODEL`, and `SAMPLING_SEED`. Additional overrides are `PYTHON_BIN`, `CONDA_ENV`, `N_SAMPLES`, `DEVICE`, `NUM_CANDIDATES`, `GUIDANCE_SCALE`, `GUIDANCE_GAMMA`, `FORCE`, `ARTIFACT_ROOT`, `DATA_ROOT`, and `OUTPUT_ROOT`.
 
 ## Evaluation rules
 
