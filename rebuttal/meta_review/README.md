@@ -64,6 +64,15 @@ The lower-level Python runner defaults to repository-local ignored data/output d
 
 The formal workflow is split into five independent, non-array SLURM scripts. Every submission handles exactly one explicitly specified dataset/model/seed combination. No script expands an experimental grid internally.
 
+For convenience, `submit_one_case.sh` submits the complete dependency graph for one experimental setting. By default it matches the paper protocol: dataset seeds 0–9, with one 256-candidate D3AO sampling run per dataset. It runs only on the login node and submits ordinary, non-array jobs; it does not perform computation itself.
+
+```bash
+CHOICE_MODEL=mmnl N_PRODUCT=100 BETA=1.0 \
+  bash rebuttal/meta_review/scripts/submit_one_case.sh
+```
+
+For a one-dataset pilot, use `DATA_SEEDS=0`. Change the single D3AO sampling seed with `SAMPLING_SEED`; the formal repetition comes from independent dataset seeds rather than repeated sampling seeds.
+
 Run `sbatch` from the repository root. The scripts use `SLURM_SUBMIT_DIR` to locate tracked code because SLURM executes a copied script from `/var/spool/slurmd`. If submission from another directory is necessary, export the absolute repository path as `REPO_ROOT`.
 
 | Stage | Script | One submission handles |

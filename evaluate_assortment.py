@@ -26,7 +26,7 @@ import torch
 
 from assortment_dataset import load_assortment_json
 from choice_models import GAsN, MNL, RAsN
-from generate_assortment_data import build_mccm_model_from_meta
+from generate_assortment_data import build_mccm_model_from_meta, build_mmnl_model_from_meta
 
 
 RewardFn = Callable[[Sequence[int], int, dict], float]
