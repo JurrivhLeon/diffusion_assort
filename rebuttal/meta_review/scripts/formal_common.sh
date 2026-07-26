@@ -4,9 +4,11 @@
 # This file is sourced by the numbered stage scripts and is not submitted itself.
 
 initialize_formal_environment() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
-  REPO_ROOT="$(cd "${script_dir}/../../.." && pwd)"
+  # SLURM copies the submitted script into /var/spool/slurmd, so BASH_SOURCE
+  # does not point back to the repository. sbatch records the submission
+  # working directory in SLURM_SUBMIT_DIR; users should submit from repo root.
+  REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+  REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
   cd "${REPO_ROOT}"
 
   CONDA_ENV="${CONDA_ENV:-SpaRest}"

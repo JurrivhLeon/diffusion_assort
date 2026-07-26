@@ -64,6 +64,8 @@ The lower-level Python runner defaults to repository-local ignored data/output d
 
 The formal workflow is split into five independent, non-array SLURM scripts. Every submission handles exactly one explicitly specified dataset/model/seed combination. No script expands an experimental grid internally.
 
+Run `sbatch` from the repository root. The scripts use `SLURM_SUBMIT_DIR` to locate tracked code because SLURM executes a copied script from `/var/spool/slurmd`. If submission from another directory is necessary, export the absolute repository path as `REPO_ROOT`.
+
 | Stage | Script | One submission handles |
 |---|---|---|
 | 1 | `01_generate_data.sh` | One dataset |

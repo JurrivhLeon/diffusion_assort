@@ -10,7 +10,8 @@
 #SBATCH --mail-user=xj58@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 set -eo pipefail
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/formal_common.sh"
+SUBMIT_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+source "${SUBMIT_ROOT}/rebuttal/meta_review/scripts/formal_common.sh"
 initialize_formal_environment
 set -u
 select_data_case
