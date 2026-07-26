@@ -258,7 +258,16 @@ def load_policy_from_checkpoint(
         model = MNL(n_products=n_products)
     elif model_name == "rasn":
         num_blocks = int(num_blocks) if num_blocks is not None else 1
-        if hidden_sizes is None:
+        state_dict = ckpt["model_state_dict"]
+        # Older training checkpoints recorded a default hidden_sizes value even
+        # though RAsN was instantiated in legacy linear-block mode. Infer that
+        # architecture from its parameter keys so those checkpoints remain
+        # loadable.
+        legacy_rasn = any(
+            key.startswith("blocks.") and key.endswith(".weight") and key.count(".") == 2
+            for key in state_dict
+        )
+        if hidden_sizes is None or legacy_rasn:
             model = RAsN(n_products=n_products, num_blocks=num_blocks)
         else:
             model = RAsN(n_products=n_products, hidden_sizes=hidden_sizes, num_blocks=num_blocks)

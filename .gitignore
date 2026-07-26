@@ -41,3 +41,6 @@ datasets/
 # IDE/editor
 .vscode/
 .idea/
+
+# Local rebuttal/reference materials
+local_rebuttal/

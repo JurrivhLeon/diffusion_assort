@@ -58,7 +58,10 @@ def build_run_config(
     architecture = {
         "name": args.model,
         "n_products": n_products,
-        "hidden_sizes": list(hidden_sizes) if args.model in ("gasn", "rasn") else None,
+        # RAsN is currently trained in legacy one-linear-layer residual mode;
+        # storing GAsN-style hidden sizes would make checkpoint loaders rebuild
+        # a different sequential-block architecture.
+        "hidden_sizes": list(hidden_sizes) if args.model == "gasn" else None,
         "num_blocks": args.num_blocks if args.model == "rasn" else None,
         "learnable_outside_logit": True,
         "tcn": tcn_config,
@@ -304,7 +307,7 @@ def main() -> None:
                 "optimizer_state_dict": optimizer.state_dict(),
                 "model": args.model,
                 "n_products": n_products,
-                "hidden_sizes": hidden_sizes if args.model in ("gasn", "rasn") else None,
+                "hidden_sizes": hidden_sizes if args.model == "gasn" else None,
                 "num_blocks": args.num_blocks if args.model == "rasn" else None,
                 "tcn_config": tcn_config,
                 "dataset_path": str(args.data),
@@ -324,7 +327,7 @@ def main() -> None:
                     "optimizer_state_dict": optimizer.state_dict(),
                     "model": args.model,
                     "n_products": n_products,
-                    "hidden_sizes": hidden_sizes if args.model in ("gasn", "rasn") else None,
+                    "hidden_sizes": hidden_sizes if args.model == "gasn" else None,
                     "num_blocks": args.num_blocks if args.model == "rasn" else None,
                     "tcn_config": tcn_config,
                     "dataset_path": str(args.data),
