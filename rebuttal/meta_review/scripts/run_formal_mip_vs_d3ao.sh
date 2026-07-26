@@ -11,7 +11,9 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --array=0-19%5
 
-set -euo pipefail
+# Conda activation hooks may probe optional unset variables (for example,
+# ADDR2LINE in binutils). Enable nounset only after the environment is active.
+set -eo pipefail
 
 # Formal rebuttal experiment: MIP versus D3AO under the same fitted rewards.
 #
@@ -50,6 +52,7 @@ else
 fi
 
 conda activate "${CONDA_ENV}"
+set -u
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
 CHOICE_MODELS="${CHOICE_MODELS:-mmnl}"
 N_PRODUCTS="${N_PRODUCTS:-100}"
